@@ -1,8 +1,12 @@
-const READ_ONLY_TYPES = new Set([14, 21, 22, 25, 30, 31, 32, 33, 34, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 47, 48]);
+const READ_ONLY_TYPES = new Set([14, 19, 21, 22, 23, 24, 25, 27, 28, 30, 31, 32, 33, 34, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 47, 48]);
 
 export function safeJson(value, fallback = value) {
   if (typeof value !== "string") return value;
   try { return JSON.parse(value); } catch (_) { return fallback; }
+}
+
+export function isWritableControl(control = {}) {
+  return !control.readonly && !control.disabled && !READ_ONLY_TYPES.has(Number(control.type));
 }
 
 export function getFieldKind(control = {}, rawValue) {
@@ -14,6 +18,7 @@ export function getFieldKind(control = {}, rawValue) {
   if (type === 36) return "checkbox";
   if (type === 15) return "date";
   if (type === 16) return "datetime";
+  if (type === 46) return "time";
   if (type === 6 || type === 8) return "number";
   if ([2, 3, 4, 5, 7].includes(type)) return "text";
   if (typeof rawValue === "boolean") return "checkbox";
@@ -21,74 +26,77 @@ export function getFieldKind(control = {}, rawValue) {
   return "readonly";
 }
 
-function optionsOf(control) {
-  return Array.isArray(control.options) ? control.options : [];
-}
+function optionsOf(control) { return Array.isArray(control.options) ? control.options : []; }
 
 function optionByText(control, text) {
   const normalized = String(text ?? "").trim();
   const matches = optionsOf(control).filter((option) => String(option.value ?? option.name ?? "").trim() === normalized);
-  if (matches.length > 1) return { error: "存在同名选项，请通过原生选择器选择" };
+  if (matches.length > 1) return { error: "存在同名选项，请打开选项菜单选择" };
   if (!matches.length && normalized) return { error: `未找到选项“${normalized}”` };
   return matches[0] || null;
 }
 
 function keysFrom(raw) {
   const value = safeJson(raw, raw);
-  if (Array.isArray(value)) return value;
+  if (Array.isArray(value)) return value.map((item) => typeof item === "object" ? item.key || item.id : item).filter(Boolean);
   return value ? [value] : [];
 }
 
-function displayRelation(raw) {
-  if (typeof raw === "number" || (typeof raw === "string" && /^\d+$/.test(raw))) return `已关联 ${raw} 条`;
+function relationItems(raw) {
+  if (typeof raw === "number" || (typeof raw === "string" && /^\d+$/.test(raw))) return [];
   const rows = safeJson(raw, raw);
-  if (!Array.isArray(rows)) return String(raw ?? "");
-  return rows.map((item) => item.name || item.title || item.rowid || item.sid || "").filter(Boolean).join(", ");
+  return Array.isArray(rows) ? rows : [];
 }
 
-function display(control, raw) {
+function itemLabels(items, keys) {
+  return items.map((item) => item.fullname || item.name || item.title || item.label || item[keys[0]] || item[keys[1]] || item).filter(Boolean).map(String);
+}
+
+export function displayValue(control, raw) {
   if (raw === undefined || raw === null || raw === "") return "";
   const kind = getFieldKind(control, raw);
   if (kind === "checkbox") return raw === true || raw === 1 || raw === "1" || raw === "true" || raw === "是" || raw === "✓" ? "✓" : "";
-  if (kind === "select") {
-    const key = keysFrom(raw)[0];
-    const option = optionsOf(control).find((item) => item.key === key);
-    return option ? option.value ?? option.name : String(key ?? "");
-  }
-  if (kind === "multiSelect") {
+  if (kind === "select" || kind === "multiSelect") {
     return keysFrom(raw).map((key) => optionsOf(control).find((item) => item.key === key)?.value ?? key).join(", ");
   }
-  if (kind === "relation") return displayRelation(raw);
+  if (kind === "relation") {
+    if (typeof raw === "number" || (typeof raw === "string" && /^\d+$/.test(raw))) return `已关联 ${raw} 条`;
+    return itemLabels(relationItems(raw), ["sid", "rowid"]).join(", ");
+  }
   if (kind === "member") {
     const members = safeJson(raw, raw);
-    return Array.isArray(members) ? members.map((item) => item.fullname || item.name || item.accountId || item).join(", ") : String(raw);
+    return Array.isArray(members) ? itemLabels(members, ["accountId", "id"]).join(", ") : String(raw);
+  }
+  if (kind === "number") {
+    const number = Number(raw);
+    if (!Number.isFinite(number)) return String(raw);
+    return Number(control.type) === 8
+      ? number.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: Number(control.dot ?? 2) })
+      : number.toLocaleString("zh-CN", { maximumFractionDigits: Number(control.dot ?? 8) });
   }
   return String(raw);
 }
 
-export function createFieldAdapter(control = {}) {
-  const kind = getFieldKind(control);
-  const read = (raw) => raw === undefined ? "" : raw;
-  const parseEditor = (input) => parseInput(input, control);
-  return {
-    control,
-    kind,
-    read,
-    display: (raw) => display(control, raw),
-    parseEditor,
-    parseClipboard: parseEditor,
-    validate: (value, required = Boolean(control.required)) => validateValue(value, control, required),
-    equals: (a, b) => JSON.stringify(a) === JSON.stringify(b),
-    serialize: (value) => serializeValue(value, control)
-  };
+export function valueLabels(control, raw) {
+  const kind = getFieldKind(control, raw);
+  if (kind === "select" || kind === "multiSelect") return displayValue(control, raw).split(/,\s*/).filter(Boolean);
+  if (kind === "member") {
+    const members = safeJson(raw, raw);
+    return Array.isArray(members) ? itemLabels(members, ["accountId", "id"]) : [];
+  }
+  if (kind === "relation") {
+    const items = relationItems(raw);
+    return items.length ? itemLabels(items, ["sid", "rowid"]) : displayValue(control, raw) ? [displayValue(control, raw)] : [];
+  }
+  return [];
 }
 
 function parseInput(input, control) {
   const kind = getFieldKind(control);
   const text = String(input ?? "").trim();
-  if (kind === "readonly" || READ_ONLY_TYPES.has(Number(control.type))) return { error: "此字段为只读字段" };
+  if (!isWritableControl(control) || kind === "readonly") return { error: "此字段为只读字段" };
   if (!text) return { value: kind === "checkbox" ? false : "" };
-  if (kind === "number") return /^-?(?:\d+\.?\d*|\.\d+)$/.test(text) ? { value: Number(text) } : { error: "请输入有效数字" };
+  if (kind === "number") return /^-?(?:\d+\.?\d*|\.\d+)$/.test(text.replace(/,/g, "")) ? { value: Number(text.replace(/,/g, "")) } : { error: "请输入有效数字" };
   if (kind === "checkbox") {
     const normalized = text.toLowerCase();
     if (["1", "是", "true", "✓", "√", "yes"].includes(normalized)) return { value: true };
@@ -96,29 +104,31 @@ function parseInput(input, control) {
     return { error: "复选框只接受 1/0、是/否、true/false 或勾选符号" };
   }
   if (kind === "date" || kind === "datetime") {
-    const match = text.match(/^(\d{4})[-/.年](\d{1,2})[-/.月](\d{1,2})日?(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
-    if (!match) return { error: "请输入明确的日期格式，如 2026-08-14" };
-    const year = Number(match[1]); const month = Number(match[2]); const day = Number(match[3]);
+    const normalized = text.replace(/年|\//g, "-").replace(/月/g, "-").replace(/日/g, "");
+    const match = normalized.match(/^(\d{4})-(\d{1,2})-(\d{1,2})(?:[ T](\d{1,2}):(\d{2})(?::(\d{2}))?)?$/);
+    if (!match) return { error: kind === "date" ? "请输入日期，如 2026-08-17" : "请输入日期时间，如 2026-08-17 14:30" };
+    const [year, month, day] = match.slice(1, 4).map(Number);
     const date = new Date(year, month - 1, day);
     const validDate = date.getFullYear() === year && date.getMonth() === month - 1 && date.getDate() === day;
     const validTime = match[4] === undefined || (Number(match[4]) < 24 && Number(match[5]) < 60 && (!match[6] || Number(match[6]) < 60));
-    return validDate && validTime ? { value: text } : { error: "日期或时间无效" };
+    return validDate && validTime ? { value: normalized } : { error: "日期或时间无效" };
   }
+  if (kind === "time") return /^([01]?\d|2[0-3]):[0-5]\d(?::[0-5]\d)?$/.test(text) ? { value: text } : { error: "请输入时间，如 14:30" };
   if (kind === "select") {
     const option = optionByText(control, text);
-    return option?.error ? option : option ? { value: [option.key] } : { value: [text] };
+    return option?.error ? option : option ? { value: [option.key] } : { value: [] };
   }
   if (kind === "multiSelect") {
     const values = [...new Set(text.split(/[,，、]/).map((item) => item.trim()).filter(Boolean))];
     const parsed = values.map((item) => optionByText(control, item));
     const error = parsed.find((item) => item?.error);
-    return error ? { error: error.error } : { value: parsed.map((item) => item.key) };
+    return error ? { error: error.error } : { value: parsed.filter(Boolean).map((item) => item.key) };
   }
-  if (kind === "member" || kind === "relation") return { error: "请点击选择器选择，不能直接粘贴文本" };
+  if (kind === "member" || kind === "relation") return { error: "请打开记录选择器选择，不能直接粘贴名称" };
   return { value: input ?? "" };
 }
 
-function validateValue(value, control, required) {
+function validateValue(value, control, required = Boolean(control.required)) {
   if (required && (value === "" || value === null || value === undefined || (Array.isArray(value) && !value.length))) return "此字段为必填字段";
   return null;
 }
@@ -132,11 +142,28 @@ function serializeValue(value, control) {
   return value ?? "";
 }
 
+export function createFieldAdapter(control = {}) {
+  const kind = getFieldKind(control);
+  return {
+    control,
+    kind,
+    writable: isWritableControl(control),
+    options: optionsOf(control),
+    display: (raw) => displayValue(control, raw),
+    labels: (raw) => valueLabels(control, raw),
+    parseEditor: (input) => parseInput(input, control),
+    parseClipboard: (input) => parseInput(input, control),
+    validate: (value, required = Boolean(control.required)) => validateValue(value, control, required),
+    equals: (a, b) => JSON.stringify(a) === JSON.stringify(b),
+    serialize: (value) => serializeValue(value, control)
+  };
+}
+
 export function getControls(runtimeConfig) {
   const controls = runtimeConfig && runtimeConfig.controls;
-  return Array.isArray(controls) ? controls : [];
+  return Array.isArray(controls) ? controls.filter((control) => Number(control.type) !== 22) : [];
 }
 
 export function structureHash(controls) {
-  return JSON.stringify((controls || []).map((c) => [c.controlId, c.type, c.controlName, c.required, (c.options || []).map((o) => [o.key, o.value]) ]));
+  return JSON.stringify((controls || []).map((control) => [control.controlId, control.type, control.controlName, control.required, control.enumDefault, control.subType, (control.options || []).map((option) => [option.key, option.value])]));
 }

@@ -6,7 +6,6 @@
     "styled-components": "^6.0.9"
   },
   "devDependencies": {
-    "@glideapps/glide-data-grid": "^6.0.3",
     "vitest": "^4.1.10"
   },
   "scripts": {
