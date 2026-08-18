@@ -90,8 +90,10 @@ export function createHistoryState(value = [], limit = DEFAULT_HISTORY_LIMIT) {
   return {
     value,
     stack: [],
+    redoStack: [],
     limit: Math.max(1, Number(limit) || DEFAULT_HISTORY_LIMIT),
     lastUndoLabel: "",
+    lastRedoLabel: "",
     conflict: false
   };
 }
@@ -108,7 +110,9 @@ export function historyReducer(state, action) {
       ...state,
       value: next || [],
       stack: [...state.stack, entry].slice(-state.limit),
+      redoStack: [],
       lastUndoLabel: "",
+      lastRedoLabel: "",
       conflict: false
     };
   }
@@ -121,11 +125,11 @@ export function historyReducer(state, action) {
       : action.rebaseHistory
         ? rebaseStack(state.stack, state.value, value)
         : state.stack;
-    return { ...state, value, stack, lastUndoLabel: "", conflict: false };
+    return { ...state, value, stack, redoStack: [], lastUndoLabel: "", lastRedoLabel: "", conflict: false };
   }
 
   if (action?.type === "clear") {
-    return { ...state, stack: [], lastUndoLabel: "", conflict: false };
+    return { ...state, stack: [], redoStack: [], lastUndoLabel: "", lastRedoLabel: "", conflict: false };
   }
 
   if (action?.type === "undo") {
@@ -137,7 +141,25 @@ export function historyReducer(state, action) {
       ...state,
       value: result.rows,
       stack: state.stack.slice(0, -1),
+      redoStack: [...state.redoStack, entry].slice(-state.limit),
       lastUndoLabel: entry.label,
+      lastRedoLabel: "",
+      conflict: false
+    };
+  }
+
+  if (action?.type === "redo") {
+    const entry = state.redoStack[state.redoStack.length - 1];
+    if (!entry) return { ...state, lastRedoLabel: "", conflict: false };
+    const result = applyRowChanges(state.value, entry.changes, "after");
+    if (result.conflict) return { ...state, redoStack: [], lastRedoLabel: "", conflict: true };
+    return {
+      ...state,
+      value: result.rows,
+      stack: [...state.stack, entry].slice(-state.limit),
+      redoStack: state.redoStack.slice(0, -1),
+      lastUndoLabel: "",
+      lastRedoLabel: entry.label,
       conflict: false
     };
   }
@@ -147,6 +169,10 @@ export function historyReducer(state, action) {
 
 export function canUndo(state) {
   return Boolean(state?.stack?.length);
+}
+
+export function canRedo(state) {
+  return Boolean(state?.redoStack?.length);
 }
 
 export function undoDepth(state) {

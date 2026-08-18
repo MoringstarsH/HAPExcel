@@ -65,7 +65,16 @@ export function mapClipboardCell(source, adapter) {
   return adapter.parseClipboard(source?.text ?? "");
 }
 
-export function buildPasteChanges({ matrix, selection, adapters, rowCount, maxCells = 5000, maxNewRows = 200 }) {
+function isEmpty(adapter, raw) {
+  if (adapter?.isEmpty) return adapter.isEmpty(raw);
+  return raw === "" || raw === null || raw === undefined || (Array.isArray(raw) && !raw.length);
+}
+
+function sourceIsEmpty(source, adapter) {
+  return source?.external ? isEmpty(adapter, source?.text ?? "") : isEmpty(adapter, source?.raw);
+}
+
+export function buildPasteChanges({ matrix, selection, adapters, rows = [], rowCount, pasteMode = "overwrite", maxCells = 5000, maxNewRows = 200 }) {
   const range = selectionRange(selection);
   if (!range || !matrix?.length || !matrix[0]?.length) return { changes: [], errors: [], skipped: [], target: range };
   const single = matrix.length === 1 && matrix[0].length === 1;
@@ -83,12 +92,16 @@ export function buildPasteChanges({ matrix, selection, adapters, rowCount, maxCe
       if (columnIndex >= adapters.length) continue;
       const source = single ? matrix[0][0] : matrix[rowOffset]?.[columnOffset];
       if (!source) continue;
+      const targetRowIndex = range.top + rowOffset;
+      const targetAdapter = adapters[columnIndex];
+      if (pasteMode !== "overwrite" && sourceIsEmpty(source, targetAdapter)) continue;
+      if (pasteMode === "fillBlank" && !isEmpty(targetAdapter, rows[targetRowIndex]?.values?.[targetAdapter?.control?.controlId])) continue;
       const mapped = mapClipboardCell(source, adapters[columnIndex]);
       if (mapped.skipped) {
-        skipped.push({ rowIndex: range.top + rowOffset, columnIndex, reason: mapped.reason });
+        skipped.push({ rowIndex: targetRowIndex, columnIndex, reason: mapped.reason });
         continue;
       }
-      const change = { rowIndex: range.top + rowOffset, columnIndex, parsedValue: mapped.value, parsedError: mapped.error };
+      const change = { rowIndex: targetRowIndex, columnIndex, parsedValue: mapped.value, parsedError: mapped.error };
       changes.push(change);
       if (mapped.error) errors.push(change);
     }

@@ -38,6 +38,12 @@ describe("field adapters", () => {
     expect(createFieldAdapter({ type: 36 }).parseEditor("是").value).toBe(true);
     expect(createFieldAdapter({ type: 36 }).parseEditor("").value).toBe(false);
     expect(createFieldAdapter({ type: 6 }).parseEditor("12.5").value).toBe(12.5);
+    expect(createFieldAdapter({ type: 6 }).emptyValue()).toBe("");
+    expect(createFieldAdapter({ type: 8 }).emptyValue()).toBe("");
+    expect(createFieldAdapter({ type: 36 }).emptyValue()).toBe(false);
+    expect(createFieldAdapter({ type: 10 }).emptyValue()).toEqual([]);
+    expect(createFieldAdapter({ type: 26 }).emptyValue()).toEqual([]);
+    expect(createFieldAdapter({ type: 29 }).emptyValue()).toEqual([]);
   });
   it("keeps member and relation clipboard input explicit", () => {
     expect(createFieldAdapter({ type: 26 }).parseEditor("张三").error).toContain("选择器");

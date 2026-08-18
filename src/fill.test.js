@@ -57,6 +57,40 @@ describe("fill handle", () => {
     ]);
   });
 
+  it("fills numeric and date arithmetic sequences", () => {
+    const number = createFieldAdapter({ controlId: "value", type: 6 });
+    const numeric = buildFillChanges({
+      sourceRange: { left: 0, right: 0, top: 0, bottom: 1 },
+      targetRow: 4,
+      rows: rows([10, 20, "", "", ""]),
+      adapters: [number],
+      fillMode: "series"
+    });
+    expect(numeric.changes.map((change) => change.directValue)).toEqual([30, 40, 50]);
+
+    const date = createFieldAdapter({ controlId: "value", type: 15 });
+    const dated = buildFillChanges({
+      sourceRange: { left: 0, right: 0, top: 0, bottom: 1 },
+      targetRow: 3,
+      rows: rows(["2026-08-01", "2026-08-03", "", ""]),
+      adapters: [date],
+      fillMode: "series"
+    });
+    expect(dated.changes.map((change) => change.directValue)).toEqual(["2026-08-05", "2026-08-07"]);
+  });
+
+  it("does not overwrite existing values in fill-blank mode", () => {
+    const adapter = createFieldAdapter({ controlId: "value", type: 2 });
+    const result = buildFillChanges({
+      sourceRange: { left: 0, right: 0, top: 0, bottom: 0 },
+      targetRow: 2,
+      rows: rows(["A", "已有", ""]),
+      adapters: [adapter],
+      writeMode: "fillBlank"
+    });
+    expect(result.changes.map((change) => change.rowIndex)).toEqual([2]);
+  });
+
   it("creates changes beyond the loaded rows without mutating rows", () => {
     const sourceRows = rows(["A"]);
     const result = buildFillChanges({

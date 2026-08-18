@@ -453,6 +453,20 @@ function serializeValue(value, control) {
   return value ?? "";
 }
 
+function emptyValueForKind(kind) {
+  if (kind === "checkbox") return false;
+  if (["select", "multiSelect", "member", "department", "appRole", "orgRole", "relation"].includes(kind)) return [];
+  return "";
+}
+
+function isEmptyValueForKind(kind, raw) {
+  const value = safeJson(raw, raw);
+  if (value === "" || value === null || value === undefined) return true;
+  if (Array.isArray(value)) return value.length === 0;
+  if (kind === "location") return !locationValue(value);
+  return false;
+}
+
 function copyValue(value) {
   if (value === null || value === undefined || typeof value !== "object") return value;
   if (typeof globalThis.structuredClone === "function") {
@@ -481,6 +495,8 @@ export function createFieldAdapter(control = {}) {
     clipboardText: (raw) => numberPresentation(control, raw) ? String(raw ?? "").replace(/,/g, "") : displayValue(control, raw),
     labels: (raw) => valueLabels(control, raw),
     relationLinks: (raw) => kind === "relation" ? relationLinks(raw) : [],
+    emptyValue: () => emptyValueForKind(kind),
+    isEmpty: (raw) => isEmptyValueForKind(kind, raw),
     parseEditor: (input) => parseInput(input, control),
     parseClipboard: (input) => parseInput(input, control),
     validate: (value, required = Boolean(control.required)) => validateValue(value, control, required),

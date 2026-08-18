@@ -19,6 +19,30 @@ function validRange(sourceRange) {
     && sourceRange.left <= sourceRange.right && sourceRange.top <= sourceRange.bottom;
 }
 
+function sequenceNumber(adapter, raw) {
+  if (adapter?.kind === "number") {
+    const value = Number(String(raw ?? "").replace(/,/g, ""));
+    return Number.isFinite(value) ? value : null;
+  }
+  if (adapter?.kind === "date" || adapter?.kind === "datetime") {
+    const value = new Date(String(raw ?? "").replace(" ", "T")).getTime();
+    return Number.isFinite(value) ? value : null;
+  }
+  return null;
+}
+
+function dateText(value, adapter, source) {
+  const date = new Date(value);
+  const pad = (number) => String(number).padStart(2, "0");
+  const base = `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+  if (adapter.kind !== "datetime" && !String(source || "").includes("T") && !String(source || "").includes(" ")) return base;
+  return `${base} ${pad(date.getHours())}:${pad(date.getMinutes())}${date.getSeconds() ? `:${pad(date.getSeconds())}` : ""}`;
+}
+
+function sequenceValue(adapter, raw, value) {
+  return adapter.kind === "date" || adapter.kind === "datetime" ? dateText(value, adapter, raw) : value;
+}
+
 /**
  * Build the values that a vertical fill-handle drag should copy.
  * The source range is never rewritten; rows outside it repeat the source
@@ -29,6 +53,8 @@ export function buildFillChanges({
   targetRow,
   rows = [],
   adapters = [],
+  fillMode = "copy",
+  writeMode = "overwrite",
   maxCells = 5000,
   maxNewRows = 200
 } = {}) {
@@ -76,6 +102,27 @@ export function buildFillChanges({
   const changes = [];
   const previewValues = [];
   const errors = [];
+  const sequences = new Map();
+  if (fillMode === "series") {
+    for (let columnIndex = range.left; columnIndex <= range.right; columnIndex += 1) {
+      const adapter = adapters[columnIndex];
+      const fieldId = adapter?.control?.controlId;
+      const first = rows[range.top]?.values?.[fieldId];
+      const second = rows[range.top + 1]?.values?.[fieldId];
+      const firstValue = sequenceNumber(adapter, first);
+      const secondValue = sequenceNumber(adapter, second);
+      if (firstValue === null || secondValue === null) {
+        sequences.set(columnIndex, { error: "序列填充至少需要同列前两个有效数字或日期" });
+      } else {
+        sequences.set(columnIndex, {
+          first: firstValue,
+          step: secondValue - firstValue,
+          last: sequenceNumber(adapter, rows[range.bottom]?.values?.[fieldId]),
+          source: rows[range.bottom]?.values?.[fieldId]
+        });
+      }
+    }
+  }
   for (let rowIndex = targetTop; rowIndex <= targetBottom; rowIndex += 1) {
     if (isInsideRange(range, rowIndex)) continue;
     const sourceRowIndex = range.top + ((rowIndex - targetTop) % sourceRows);
@@ -92,7 +139,22 @@ export function buildFillChanges({
         errors.push({ rowIndex, columnIndex, error: "已删除行不能填充" });
         continue;
       }
-      const value = adapter.copyValue ? adapter.copyValue(sourceValue) : sourceValue;
+      if (writeMode === "fillBlank" && !adapter.isEmpty?.(targetRowData?.values?.[sourceFieldId])) continue;
+      let value;
+      if (fillMode === "series") {
+        const sequence = sequences.get(columnIndex);
+        if (sequence?.error || sequence?.last === null) {
+          errors.push({ rowIndex, columnIndex, error: sequence?.error || "序列源值无效" });
+          continue;
+        }
+        const below = rowIndex > range.bottom;
+        const offset = below ? rowIndex - range.bottom : range.top - rowIndex;
+        const base = below ? sequence.last : sequence.first;
+        const next = below ? base + sequence.step * offset : base - sequence.step * offset;
+        value = sequenceValue(adapter, below ? sequence.source : rows[range.top]?.values?.[sourceFieldId], next);
+      } else {
+        value = adapter.copyValue ? adapter.copyValue(sourceValue) : sourceValue;
+      }
       const preview = {
         rowIndex,
         columnIndex,

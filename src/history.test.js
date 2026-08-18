@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { canUndo, createHistoryState, diffRows, historyReducer, undoDepth } from "./history";
+import { canRedo, canUndo, createHistoryState, diffRows, historyReducer, undoDepth } from "./history";
 
 function row(key, values = {}, extra = {}) {
   return { key, values, state: "clean", dirtyFields: [], cellErrors: {}, ...extra };
@@ -17,6 +17,17 @@ describe("row history", () => {
     state = historyReducer(state, { type: "undo" });
     expect(state.value).toEqual([before]);
     expect(canUndo(state)).toBe(false);
+  });
+
+  it("supports redo and clears redo after a new edit", () => {
+    let state = apply(createHistoryState([]), [row("a")], "新增");
+    state = historyReducer(state, { type: "undo" });
+    expect(canRedo(state)).toBe(true);
+    state = historyReducer(state, { type: "redo" });
+    expect(state.value).toEqual([row("a")]);
+    expect(state.lastRedoLabel).toBe("新增");
+    state = apply(state, [row("b")], "替换");
+    expect(canRedo(state)).toBe(false);
   });
 
   it("records one batch operation as one history item", () => {

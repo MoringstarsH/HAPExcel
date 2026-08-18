@@ -30,6 +30,32 @@ describe("commit pipeline", () => {
     expect(result.writes[0].ok).toBe(true);
   });
 
+  it("submits an explicitly cleared optional number as an empty value", async () => {
+    const gateway = { add: vi.fn(), update: vi.fn(async () => ({ success: true })), deleteRows: vi.fn() };
+    const row = { ...serverRow(), values: { quantity: "" }, dirtyFields: ["quantity"] };
+
+    await commitRows([row], [optionalNumber], gateway);
+
+    expect(gateway.update).toHaveBeenCalledWith("row-1", [
+      { controlId: "quantity", type: 6, value: "" }
+    ]);
+  });
+
+  it("stops scheduling writes after cancellation and preserves cancelled rows", async () => {
+    const controller = new AbortController();
+    const gateway = { add: vi.fn(), update: vi.fn(async () => { controller.abort(); return { success: true }; }), deleteRows: vi.fn() };
+    const rows = [
+      { ...serverRow(), key: "row-1", rowId: "row-1", values: { quantity: 1 }, dirtyFields: ["quantity"] },
+      { ...serverRow(), key: "row-2", rowId: "row-2", values: { quantity: 2 }, dirtyFields: ["quantity"] },
+      { ...serverRow(), key: "row-3", rowId: "row-3", values: { quantity: 3 }, dirtyFields: ["quantity"] },
+      { ...serverRow(), key: "row-4", rowId: "row-4", values: { quantity: 4 }, dirtyFields: ["quantity"] }
+    ];
+    const result = await commitRows(rows, [optionalNumber], gateway, () => {}, { signal: controller.signal });
+    expect(result.cancelled).toBe(true);
+    expect(result.writes.some((entry) => entry.outcome === "cancelled")).toBe(true);
+    expect(applyCommitResult(rows, result).some((row) => row.key === "row-2")).toBe(true);
+  });
+
   it("still blocks invalid or empty required values", () => {
     const requiredNumber = createFieldAdapter({ controlId: "quantity", type: 6, required: true });
     const invalid = { ...newRow({ quantity: "bad" }, ["quantity"]), cellErrors: { quantity: "请输入有效数字" } };

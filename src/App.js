@@ -6,9 +6,11 @@ import { hiddenErrorFieldNames, resolveVisibleControls } from "./columns";
 import { applyCommitResult, commitRows, commitSummary, normalizeOptionalFieldErrors, validateRows } from "./commit";
 import { clearDrafts, loadDrafts, saveDrafts } from "./drafts";
 import { createGateway, rowIdOf } from "./gateway";
-import { canUndo, createHistoryState, historyReducer } from "./history";
+import { canRedo, canUndo, createHistoryState, historyReducer } from "./history";
 import { createDraftRow, createServerRow, editRow, hasPendingChange, markDeleted, mergeQueriedRows, mergeRestoredDrafts, mergeServerPage, rebaseRowFromServer, restoreDeleted } from "./rows";
 import { clampCell, containsCell, moveSelection, selectionRange } from "./selection";
+import { buildClearChanges } from "./clear";
+import { buildReplaceChanges, buildValueChanges, filteredRowIndexes, targetRowsForColumn } from "./batch";
 import { buildFillChanges, fillPreviewMap } from "./fill";
 import { clampColumnWidth, clampRowHeight, DEFAULT_ROW_HEIGHT, layoutNeedsMigration, migrateRowHeights, normalizeLayout } from "./layout";
 import { buildNativeFilter, defaultFilterForControl, filterMapToList, filterOptionsForControl, mergeQueryParams } from "./query";
@@ -41,6 +43,7 @@ function saveSummaryText(summary) {
     if (item.unknown) parts.push(`${label}待核对 ${item.unknown}`);
     if (item.skipped) parts.push(`${label}暂缓 ${item.skipped}`);
   }
+  if (summary.cancelled) parts.push(`待处理 ${summary.cancelled}`);
   return parts.join("，") || "没有可提交操作";
 }
 
@@ -123,6 +126,22 @@ function ColumnMenu({ column, control, adapter, position, queryFilter, sortId, i
             onApply={(next) => { onFilter(control.controlId, next); onClose(); }}
             onClear={() => { onClearFilter(control.controlId); onClose(); }}
           />}
+    </div>
+  </>;
+}
+
+function ContextMenu({ position, onAction, onClose }) {
+  const items = [
+    ["copy", "复制"], ["cut", "剪切"], ["clear", "清空"], ["paste", "粘贴"],
+    ["pasteSkipEmpty", "选择性粘贴：跳过空值"], ["pasteFillBlank", "选择性粘贴：仅填空白"],
+    ["undo", "撤销"], ["redo", "重做"], ["set", "批量设置当前字段"],
+    ["replace", "批量替换"], ["fill", "复制式填充"], ["series", "序列填充"],
+    ["fillBlank", "仅填充空白"], ["column", "整列批量赋值"], ["condition", "按当前筛选条件修改"]
+  ];
+  return <>
+    <button type="button" className="popover-scrim" aria-label="关闭右键菜单" onClick={onClose} />
+    <div className="context-menu column-menu" role="menu" aria-label="单元格操作菜单" style={{ left: position.left, top: position.top }} onPointerDown={(event) => event.stopPropagation()}>
+      {items.map(([key, label]) => <button key={key} type="button" role="menuitem" className="column-menu-item" onClick={() => { onAction(key); onClose(); }}>{label}</button>)}
     </div>
   </>;
 }
@@ -307,6 +326,7 @@ export default function App() {
   const layoutRevisionRef = useRef(0);
   const commitLockRef = useRef(false);
   const activeCommitRef = useRef("");
+  const commitAbortRef = useRef(null);
   const autoScrollRef = useRef({ frame: 0, x: 0, y: 0, clientX: 0, clientY: 0 });
   const [rowHistory, dispatchRows] = useReducer(historyReducer, [], createHistoryState);
   const rows = rowHistory.value;
@@ -321,6 +341,7 @@ export default function App() {
     });
   }, []);
   const undoRows = useCallback(() => dispatchRows({ type: "undo" }), []);
+  const redoRows = useCallback(() => dispatchRows({ type: "redo" }), []);
   const [total, setTotal] = useState(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadState, setLoadState] = useState("loading");
@@ -337,6 +358,7 @@ export default function App() {
   const [layoutReady, setLayoutReady] = useState(false);
   const [layoutStatus, setLayoutStatus] = useState("");
   const [columnMenu, setColumnMenu] = useState(null);
+  const [contextMenu, setContextMenu] = useState(null);
   const [resizing, setResizing] = useState(null);
   const [queryState, setQueryState] = useState({ sortId: "", isAsc: true, filterMap: {} });
   const [saveProgress, setSaveProgress] = useState(null);
@@ -355,7 +377,8 @@ export default function App() {
   useEffect(() => {
     if (rowHistory.conflict) setMessage("撤销已取消：数据已被外部刷新");
     else if (rowHistory.lastUndoLabel) setMessage(`已撤销：${rowHistory.lastUndoLabel}`);
-  }, [rowHistory.conflict, rowHistory.lastUndoLabel]);
+    else if (rowHistory.lastRedoLabel) setMessage(`已重做：${rowHistory.lastRedoLabel}`);
+  }, [rowHistory.conflict, rowHistory.lastRedoLabel, rowHistory.lastUndoLabel]);
 
   useEffect(() => diagnostics.subscribe(setDiagnosticEntries), []);
   useEffect(() => {
@@ -792,6 +815,23 @@ export default function App() {
       : `已填充 ${result.changes.length} 个单元格`);
   }, [adapters, applyChanges, rows, stopAutoScroll]);
 
+  const fillToEnd = useCallback((event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    if (!fillSourceRange || !rows.length) return;
+    const result = buildFillChanges({
+      sourceRange: fillSourceRange,
+      targetRow: rows.length - 1,
+      rows,
+      adapters,
+      maxCells: MAX_CELLS,
+      maxNewRows: MAX_NEW_ROWS
+    });
+    if (result.fatal) { setMessage(result.fatal); return; }
+    if (result.changes.length) applyChanges(result.changes, "双击填充柄");
+    setMessage(`已自动向下填充 ${result.changes.length} 格`);
+  }, [adapters, applyChanges, fillSourceRange, rows, setMessage]);
+
   const selectCell = useCallback((cell, extend = false) => {
     const startedAt = globalThis.performance?.now?.() || Date.now();
     setEditingCell(null);
@@ -831,11 +871,25 @@ export default function App() {
     setMessage(`已复制 ${range.width * range.height} 个单元格`);
   }, [adapters, cellSelection, editingCell, rows]);
 
+  const cutCells = useCallback((event) => {
+    if (!cellSelection || editingCell) return;
+    const payload = createClipboardPayload(cellSelection, rows, adapters);
+    if (!payload) return;
+    event.preventDefault();
+    event.clipboardData.setData("text/plain", payload.plain);
+    try { event.clipboardData.setData(GRID_CLIPBOARD_TYPE, payload.structured); } catch (_) { /* plain TSV still works */ }
+    const result = buildClearChanges({ selection: cellSelection, rows, adapters });
+    if (result.changes.length) applyChanges(result.changes, "剪切单元格");
+    const parts = [`已剪切 ${result.changes.length} 格`];
+    if (result.skipped) parts.push(`跳过 ${result.skipped} 格不可编辑单元格`);
+    setMessage(parts.join("，"));
+  }, [adapters, applyChanges, cellSelection, editingCell, rows]);
+
   const pasteCells = useCallback((event) => {
     if (!cellSelection || editingCell) return;
     event.preventDefault();
     const matrix = readClipboardMatrix(event.clipboardData.getData("text/plain"), event.clipboardData.getData(GRID_CLIPBOARD_TYPE));
-    const result = buildPasteChanges({ matrix, selection: cellSelection, adapters, rowCount: rows.length, maxCells: MAX_CELLS, maxNewRows: MAX_NEW_ROWS });
+    const result = buildPasteChanges({ matrix, selection: cellSelection, adapters, rows, rowCount: rows.length, maxCells: MAX_CELLS, maxNewRows: MAX_NEW_ROWS });
     if (result.fatal) { setMessage(result.fatal); return; }
     if (result.changes.length) applyChanges(result.changes, "批量粘贴");
     if (result.target) setCellSelection({ anchor: { column: result.target.left, row: result.target.top }, focus: { column: result.target.right, row: result.target.bottom } });
@@ -846,7 +900,106 @@ export default function App() {
     if (result.skipped.length) parts.push(`忽略 ${result.skipped.length} 个只读单元格`);
     if (result.errors.length) parts.push(`${result.errors.length} 格类型不匹配或格式错误`);
     setMessage(parts.join("，") || "没有可粘贴的单元格");
-  }, [adapters, applyChanges, cellSelection, editingCell, rows.length]);
+  }, [adapters, applyChanges, cellSelection, editingCell, rows]);
+
+  const handleCellContextMenu = useCallback((event, cell) => {
+    event.preventDefault();
+    const inside = containsCell(cellSelection, cell.column, cell.row);
+    const selection = inside && cellSelection ? cellSelection : { anchor: cell, focus: cell };
+    if (!inside) setCellSelection(selection);
+    setEditingCell(null);
+    setContextMenu({ left: Math.min(window.innerWidth - 260, Math.max(8, event.clientX)), top: Math.min(window.innerHeight - 420, Math.max(8, event.clientY)), columnIndex: cell.column, rowIndex: cell.row, selection });
+  }, [cellSelection]);
+
+  const runContextAction = useCallback(async (action) => {
+    const menu = contextMenu;
+    if (!menu) return;
+    const selection = menu.selection;
+    const adapter = adapters[menu.columnIndex];
+    const row = rows[menu.rowIndex];
+    const confirmImpact = (label, count, skipped = 0, force = false) => {
+      if (!force && count <= 50 && Math.ceil(count / Math.max(1, selectionRange(selection)?.width || 1)) <= 20) return true;
+      return window.confirm(`${label}\n预计修改 ${count} 个单元格${skipped ? `，跳过 ${skipped} 个不可编辑单元格` : ""}。\n操作将先生成本地草稿，可通过撤销恢复。`);
+    };
+    const payload = createClipboardPayload(selection, rows, adapters);
+    const writePlainClipboard = async () => {
+      if (!payload) return false;
+      try { await navigator.clipboard.writeText(payload.plain); return true; }
+      catch (_) { setMessage("无法访问系统剪贴板，请使用 Ctrl/Cmd+C"); return false; }
+    };
+    if (action === "copy" || action === "cut") {
+      const copied = await writePlainClipboard();
+      if (!copied) return;
+      if (action === "cut") {
+        const cleared = buildClearChanges({ selection, rows, adapters });
+        if (cleared.changes.length) applyChanges(cleared.changes, "剪切单元格");
+        setMessage(`已剪切 ${cleared.changes.length} 格${cleared.skipped ? `，跳过 ${cleared.skipped} 格` : ""}`);
+      } else setMessage("已复制选区");
+      return;
+    }
+    if (action === "clear") {
+      const result = buildClearChanges({ selection, rows, adapters });
+      if (result.changes.length) applyChanges(result.changes, "批量清空单元格");
+      setMessage(`已清空 ${result.changes.length} 格${result.skipped ? `，跳过 ${result.skipped} 格` : ""}`);
+      return;
+    }
+    if (action === "undo") { undoRows(); return; }
+    if (action === "redo") { redoRows(); return; }
+    if (action === "paste" || action === "pasteSkipEmpty" || action === "pasteFillBlank") {
+      try {
+        const text = await navigator.clipboard.readText();
+        const mode = action === "pasteSkipEmpty" ? "skipEmpty" : action === "pasteFillBlank" ? "fillBlank" : "overwrite";
+        const matrix = readClipboardMatrix(text, "");
+        const result = buildPasteChanges({ matrix, selection, adapters, rows, rowCount: rows.length, pasteMode: mode, maxCells: MAX_CELLS, maxNewRows: MAX_NEW_ROWS });
+        if (result.fatal) { setMessage(result.fatal); return; }
+        if (result.changes.length) applyChanges(result.changes, `选择性粘贴${mode === "overwrite" ? "" : mode === "skipEmpty" ? "（跳过空值）" : "（仅填空白）"}`);
+        setMessage(`已粘贴 ${result.changes.length} 格${result.skipped.length ? `，跳过 ${result.skipped.length} 格` : ""}`);
+      } catch (_) { setMessage("无法读取系统剪贴板，请使用 Ctrl/Cmd+V"); }
+      return;
+    }
+    if (["fill", "series", "fillBlank"].includes(action)) {
+      const range = selectionRange(selection);
+      const result = buildFillChanges({ sourceRange: range, targetRow: rows.length - 1, rows, adapters, fillMode: action === "series" ? "series" : "copy", writeMode: action === "fillBlank" ? "fillBlank" : "overwrite", maxCells: MAX_CELLS, maxNewRows: MAX_NEW_ROWS });
+      if (result.fatal) { setMessage(result.fatal); return; }
+      if (!confirmImpact(action === "series" ? "确认执行序列填充？" : "确认执行批量填充？", result.changes.length, result.errors.length)) return;
+      if (result.changes.length) applyChanges(result.changes, action === "series" ? "序列填充" : action === "fillBlank" ? "仅填充空白" : "复制式填充");
+      setMessage(`已填充 ${result.changes.length} 格${result.errors.length ? `，跳过 ${result.errors.length} 格` : ""}`);
+      return;
+    }
+    if (["set", "column", "condition"].includes(action)) {
+      let rowIndexes;
+      if (action === "column") rowIndexes = rows.map((item, index) => item?.rowId && item.state !== "deleted" ? index : -1).filter((index) => index >= 0);
+      else if (action === "condition") rowIndexes = filteredRowIndexes(rows, queryState.filterMap, controls, adapters);
+      else rowIndexes = targetRowsForColumn(selection, menu.columnIndex, rows, adapters).rowIndexes;
+      if (!rowIndexes.length) { setMessage("没有符合条件的可编辑记录"); return; }
+      if (!confirmImpact(action === "column" ? "确认整列批量赋值？" : action === "condition" ? "确认按当前筛选条件修改？" : "确认批量设置？", rowIndexes.length, 0, action !== "set")) return;
+      if (["select", "multiSelect", "member", "department", "orgRole", "relation", "location"].includes(adapter?.kind)) {
+        setCellSelection({ anchor: { column: menu.columnIndex, row: rowIndexes[0] ?? menu.rowIndex }, focus: { column: menu.columnIndex, row: rowIndexes[rowIndexes.length - 1] ?? menu.rowIndex } });
+        setContextMenu(null);
+        await activateCell([menu.columnIndex, rowIndexes[0] ?? menu.rowIndex], null, rowIndexes);
+        return;
+      }
+      const input = window.prompt(`${adapter?.control?.controlName || "字段"}批量赋值`, "");
+      if (input === null) return;
+      const parsed = adapter?.parseEditor(input) || { error: "字段不可编辑" };
+      const changes = rowIndexes.map((rowIndex) => ({ rowIndex, columnIndex: menu.columnIndex, parsedValue: parsed.value, parsedError: parsed.error }));
+      if (changes.length) applyChanges(changes, action === "condition" ? "按条件批量修改" : action === "column" ? "整列批量赋值" : "批量设置字段");
+      setMessage(`已生成 ${changes.length} 格本地草稿`);
+      return;
+    }
+    if (action === "replace") {
+      const find = window.prompt("查找内容", "");
+      if (find === null) return;
+      const replacement = window.prompt("替换为", "");
+      if (replacement === null) return;
+      const rowIndexes = targetRowsForColumn(selection, menu.columnIndex, rows, adapters).rowIndexes;
+      const result = buildReplaceChanges({ rows, rowIndexes, columnIndex: menu.columnIndex, adapters, find, replacement });
+      if (result.fatal) { setMessage(result.fatal); return; }
+      if (!confirmImpact("确认执行批量替换？", result.changes.length, result.skipped)) return;
+      if (result.changes.length) applyChanges(result.changes, "批量替换");
+      setMessage(`已生成 ${result.changes.length} 格替换草稿${result.errors.length ? `，${result.errors.length} 格待修正` : ""}`);
+    }
+  }, [adapters, applyChanges, contextMenu, controls, queryState.filterMap, redoRows, rows, setMessage, undoRows, activateCell]);
 
   const openNativeEditor = useCallback(async (row, adapter) => {
     if (!row?.rowId) {
@@ -873,7 +1026,7 @@ export default function App() {
     }
   }, [allControls, gateway, setRows]);
 
-  const activateCell = useCallback(async ([columnIndex, rowIndex], anchor) => {
+  const activateCell = useCallback(async ([columnIndex, rowIndex], anchor, explicitRows = null) => {
     const row = rows[rowIndex];
     const adapter = adapters[columnIndex];
     if (!row || !adapter || (!adapter.writable && !adapter.nativeEditor) || row.state === "deleted") return;
@@ -884,7 +1037,9 @@ export default function App() {
     }
     if (adapter.kind === "select" || adapter.kind === "multiSelect") {
       const bounds = anchor?.getBoundingClientRect?.();
-      setPicker({ columnIndex, rowIndex, left: Math.max(8, bounds?.x || 16), top: Math.max(8, Math.min(window.innerHeight - 300, (bounds?.y || 40) + (bounds?.height || 36))) });
+      const targetRows = explicitRows || [rowIndex];
+      const boundsRows = targetRows.length ? targetRows : [rowIndex];
+      setPicker({ columnIndex, rowIndex, rowIndexes: boundsRows, left: Math.max(8, bounds?.x || 16), top: Math.max(8, Math.min(window.innerHeight - 300, (bounds?.y || 40) + (bounds?.height || 36))) });
       return;
     }
     if (!["member", "department", "orgRole", "relation", "location"].includes(adapter.kind)) return;
@@ -896,7 +1051,8 @@ export default function App() {
         : await gateway.selectRelation(adapter.control);
       if (!selected || (Array.isArray(selected) && !selected.length)) return;
       if (adapter.kind === "location") {
-        applyChanges([{ rowIndex, columnIndex, directValue: selected }], "选择定位");
+        const targetRows = explicitRows || [rowIndex];
+        applyChanges((targetRows.length ? targetRows : [rowIndex]).map((targetRow) => ({ rowIndex: targetRow, columnIndex, directValue: selected })), "批量设置定位");
         return;
       }
       const list = Array.isArray(selected) ? selected : [selected];
@@ -908,11 +1064,12 @@ export default function App() {
         : adapter.kind === "orgRole"
         ? (unique ? list.slice(0, 1) : list).map((item) => ({ ...item, organizeId: item.organizeId || item.id || item }))
         : (unique ? list.slice(0, 1) : list).map((item) => ({ ...item, sid: item.sid || item.rowid || item.id || item }));
-      applyChanges([{ rowIndex, columnIndex, directValue: value }], `选择${adapter.control.controlName || "字段"}`);
+      const targetRows = explicitRows || [rowIndex];
+      applyChanges((targetRows.length ? targetRows : [rowIndex]).map((targetRow) => ({ rowIndex: targetRow, columnIndex, directValue: adapter.copyValue ? adapter.copyValue(value) : value })), `批量设置${adapter.control.controlName || "字段"}`);
     } catch (error) {
       setMessage(`选择失败：${error?.message || "操作已取消"}`);
     }
-  }, [adapters, applyChanges, gateway, openNativeEditor, rows]);
+  }, [adapters, applyChanges, cellSelection, gateway, openNativeEditor, rows]);
 
   const beginEdit = useCallback((cell, anchor) => {
     const row = rows[cell.row];
@@ -960,27 +1117,32 @@ export default function App() {
       const cell = cellSelection.focus;
       beginEdit(cell, document.querySelector(`[data-grid-row="${cell.row}"][data-grid-column="${cell.column}"]`));
     } else if (event.key === "Delete" || event.key === "Backspace") {
-      const cell = cellSelection.focus;
-      const adapter = adapters[cell.column];
-      const row = rows[cell.row];
-      if (adapter?.writable && row && row.state !== "deleted" && ["select", "multiSelect", "member", "department", "orgRole", "relation", "location"].includes(adapter.kind)) {
+      const result = buildClearChanges({ selection: cellSelection, rows, adapters });
+      if (result.changes.length || result.skipped) {
         event.preventDefault();
-        applyChanges([{ rowIndex: cell.row, columnIndex: cell.column, directValue: adapter.kind === "location" ? "" : [] }], `清空${adapter.control.controlName || "字段"}`);
+        if (result.changes.length) applyChanges(result.changes, "批量清空单元格");
+        const messageParts = result.changes.length ? [`已清空 ${result.changes.length} 格`] : ["没有可清空的单元格"];
+        if (result.skipped) messageParts.push(`跳过 ${result.skipped} 格不可编辑单元格`);
+        setMessage(messageParts.join("，"));
       }
     }
-  }, [adapters, applyChanges, beginEdit, cancelFillDrag, cellSelection, editingCell, fillDrag, moveCellSelection, rows]);
+  }, [adapters, applyChanges, beginEdit, cancelFillDrag, cellSelection, editingCell, fillDrag, moveCellSelection, rows, setMessage]);
 
   const handleUndoKeyDown = useCallback((event) => {
     const key = String(event.key || "").toLowerCase();
-    if (!(event.ctrlKey || event.metaKey) || event.shiftKey || key !== "z" || event.isComposing) return;
-    if (loadState !== "ready" || picker || !canUndo(rowHistory)) return;
+    if (!(event.ctrlKey || event.metaKey) || event.isComposing) return;
+    const redo = (key === "y" && !event.shiftKey) || (key === "z" && event.shiftKey);
+    const undo = key === "z" && !event.shiftKey;
+    if (!redo && !undo) return;
+    if (loadState !== "ready" || picker || (redo ? !canRedo(rowHistory) : !canUndo(rowHistory))) return;
     const target = event.target;
     const tagName = target?.tagName?.toLowerCase();
     const textInput = tagName === "textarea" || target?.isContentEditable || (tagName === "input" && !["checkbox", "radio", "button", "submit", "reset"].includes(target.type));
     if (textInput) return;
     event.preventDefault();
-    undoRows();
-  }, [loadState, picker, rowHistory, undoRows]);
+    if (redo) redoRows();
+    else undoRows();
+  }, [loadState, picker, redoRows, rowHistory, undoRows]);
 
   const beginColumnResize = useCallback((event, fieldId) => {
     if (event.button !== 0) return;
@@ -1119,6 +1281,8 @@ export default function App() {
     const summary = [pending.added && `新增 ${pending.added}`, pending.modified && `修改 ${pending.modified}`, pending.deleted && `删除 ${pending.deleted}`].filter(Boolean).join("、");
     if (!window.confirm(`确认提交：${summary}？\n删除操作提交后不可由本表格撤销。`)) return;
     commitLockRef.current = true;
+    const abortController = new AbortController();
+    commitAbortRef.current = abortController;
     const batchId = globalThis.crypto?.randomUUID?.() || `commit-${Date.now()}`;
     activeCommitRef.current = batchId;
     const submittingRows = preparedRows.map((row) => hasPendingChange(row) ? { ...row, commitBatchId: batchId } : row);
@@ -1131,7 +1295,7 @@ export default function App() {
       const result = await commitRows(submittingRows, allAdapters, gateway, (progress) => {
         setSaveProgress(progress);
         setMessage(progress.phase === "delete" ? "正在删除记录…" : `正在保存 ${progress.completed}/${progress.total}…`);
-      });
+      }, { signal: abortController.signal });
       let next = applyCommitResult(submittingRows, result);
       const refreshed = await Promise.all(result.writes.filter((entry) => entry.ok).map(async (entry) => {
         const committed = next.find((row) => row.key === entry.item.key);
@@ -1152,6 +1316,12 @@ export default function App() {
       setRows(next, remoteMutation ? { clearHistory: true } : { rebaseHistory: true });
       saveDrafts(runtimeConfig, allControls, next);
       if (!failed && !result.deleteSkipped) clearDrafts(runtimeConfig);
+      if (result.cancelled) {
+        setRows(next, { rebaseHistory: true });
+        saveDrafts(runtimeConfig, allControls, next);
+        setMessage(`保存已取消：${resultText}；未处理草稿已保留`);
+        return;
+      }
       setMessage(`${failed || result.deleteSkipped ? "部分保存完成" : "保存完成"}：${resultText}，正在复核服务端…`);
       await loadInitial(filtersRef.current);
       setMessage(`${failed || result.deleteSkipped ? "部分保存完成" : "保存成功"}：${resultText}`);
@@ -1161,9 +1331,16 @@ export default function App() {
       setMessage(`保存流程异常：${error?.message || "请查看诊断详情"}`);
     } finally {
       if (activeCommitRef.current === batchId) activeCommitRef.current = "";
+      if (commitAbortRef.current === abortController) commitAbortRef.current = null;
       commitLockRef.current = false;
       setSaveProgress(null);
     }
+  }
+
+  function cancelSave() {
+    if (loadState !== "saving") return;
+    commitAbortRef.current?.abort();
+    setMessage("正在取消保存，已发出的请求会继续完成…");
   }
 
   function discard() {
@@ -1223,9 +1400,9 @@ export default function App() {
         <button type="button" className="ghost-button" onClick={() => setDiagnosticsOpen((value) => !value)}>诊断{diagnosticEntries.some((entry) => entry.level === "error") ? " !" : ""}</button>
         <button type="button" className="ghost-button" onClick={manualRefresh} disabled={loadState === "saving"}>刷新</button>
         <button type="button" className="ghost-button" onClick={discard} disabled={!hasDrafts && !refreshPending}>放弃草稿</button>
-        <button type="button" className="save-button" onClick={save} disabled={!hasDrafts || loadState === "saving" || !online}>
-          {loadState === "saving" ? `保存中${saveProgress?.total ? ` ${saveProgress.completed}/${saveProgress.total}` : "…"}` : "保存"}
-        </button>
+        {loadState === "saving"
+          ? <button type="button" className="ghost-button" onClick={cancelSave}>取消保存</button>
+          : <button type="button" className="save-button" onClick={save} disabled={!hasDrafts || !online}>保存</button>}
       </div>
     </header>
 
@@ -1254,7 +1431,7 @@ export default function App() {
         : controls.length === 0
           ? <div className="state-panel"><strong>没有可显示字段</strong><span>当前运行时没有提供视图字段配置，请检查自定义视图配置。</span></div>
           : <div className="native-grid-scroll" ref={gridRef} tabIndex={0} role="grid" aria-multiselectable="true"
-            onKeyDown={handleGridKeyDown} onCopy={copyCells} onPaste={pasteCells} onPointerMove={handleGridPointerMove}
+            onKeyDown={handleGridKeyDown} onCopy={copyCells} onCut={cutCells} onPaste={pasteCells} onPointerMove={handleGridPointerMove}
             onScroll={(event) => {
               const el = event.currentTarget;
               setVirtualScrollTop(el.scrollTop);
@@ -1325,6 +1502,7 @@ export default function App() {
                         draggingRef.current = true;
                         selectCell(cell, event.shiftKey);
                       }}
+                      onContextMenu={(event) => handleCellContextMenu(event, cell)}
                       onDoubleClick={(event) => { event.preventDefault(); if (interactive) beginEdit(cell, event.currentTarget); }}
                     >
                       {editing
@@ -1373,6 +1551,7 @@ export default function App() {
                         title="拖拽填充"
                         tabIndex={-1}
                         onPointerDown={beginFillDrag}
+                        onDoubleClick={fillToEnd}
                       />}
                     </td>;
                   })}
@@ -1405,11 +1584,17 @@ export default function App() {
       onClose={() => setColumnMenu(null)}
     />}
 
+    {contextMenu && <ContextMenu
+      position={contextMenu}
+      onAction={runContextAction}
+      onClose={() => setContextMenu(null)}
+    />}
+
     {picker && pickerAdapter && pickerRow && <ChoicePopover
       picker={picker}
       adapter={pickerAdapter}
       value={pickerRow.values[pickerAdapter.control.controlId]}
-      onApply={(value) => applyChanges([{ rowIndex: picker.rowIndex, columnIndex: picker.columnIndex, directValue: value }], pickerAdapter.kind === "multiSelect" || pickerAdapter.kind === "select" ? "选择选项" : "编辑字段")}
+      onApply={(value) => applyChanges((picker.rowIndexes || [picker.rowIndex]).map((rowIndex) => ({ rowIndex, columnIndex: picker.columnIndex, directValue: pickerAdapter.copyValue ? pickerAdapter.copyValue(value) : value })), pickerAdapter.kind === "multiSelect" || pickerAdapter.kind === "select" ? "批量选择选项" : "批量编辑字段")}
       onClose={() => setPicker(null)}
     />}
   </div>;

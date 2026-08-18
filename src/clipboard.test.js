@@ -49,6 +49,23 @@ describe("clipboard", () => {
     expect(result.changes.every((change) => change.parsedValue === 7)).toBe(true);
   });
 
+  it("supports skipping empty sources and filling only blank targets", () => {
+    const adapters = [adapter("text", "name"), adapter("text", "code")];
+    const selection = { anchor: { column: 0, row: 0 }, focus: { column: 1, row: 1 } };
+    const rows = [
+      { values: { name: "已有", code: "已有" } },
+      { values: { name: "", code: "已有" } }
+    ];
+    const matrix = [[{ text: "", external: true }, { text: "新", external: true }], [{ text: "新2", external: true }, { text: "", external: true }]];
+    expect(buildPasteChanges({ matrix, selection, adapters, rows, rowCount: 2, pasteMode: "skipEmpty" }).changes).toEqual([
+      expect.objectContaining({ rowIndex: 0, columnIndex: 1 }),
+      expect.objectContaining({ rowIndex: 1, columnIndex: 0 })
+    ]);
+    expect(buildPasteChanges({ matrix, selection, adapters, rows, rowCount: 2, pasteMode: "fillBlank" }).changes).toEqual([
+      expect.objectContaining({ rowIndex: 1, columnIndex: 0 })
+    ]);
+  });
+
   it("enforces structured special-field compatibility", () => {
     const source = { sourceKind: "relation", sourceControlId: "r1", raw: [{ sid: "x" }], text: "客户A" };
     expect(mapClipboardCell(source, adapter("relation", "r1")).value[0].sid).toBe("x");

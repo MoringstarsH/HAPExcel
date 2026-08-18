@@ -60,12 +60,16 @@ export function normalizeOptionalFieldErrors(rows, adapters) {
   });
 }
 
-async function runWorkers(items, worker, concurrency = 3) {
+async function runWorkers(items, worker, concurrency = 3, signal) {
   const results = [];
   let cursor = 0;
   async function run() {
     while (cursor < items.length) {
       const item = items[cursor++];
+      if (signal?.aborted) {
+        results.push({ item, ok: false, outcome: "cancelled", message: "保存已取消" });
+        continue;
+      }
       try {
         const response = await worker(item);
         results.push({ item, ...response, response });
@@ -76,7 +80,7 @@ async function runWorkers(items, worker, concurrency = 3) {
   return results;
 }
 
-export async function commitRows(rows, adapters, gateway, onProgress = () => {}) {
+export async function commitRows(rows, adapters, gateway, onProgress = () => {}, options = {}) {
   const preparedRows = normalizeOptionalFieldErrors(rows, adapters);
   const validationErrors = validateRows(preparedRows, adapters);
   if (validationErrors.size) return { validationErrors, writes: [], deletion: null, deleteSkipped: false };
@@ -92,13 +96,13 @@ export async function commitRows(rows, adapters, gateway, onProgress = () => {})
     completed += 1;
     onProgress({ completed, total: writeRows.length, phase: "write" });
     return response;
-  });
+  }, 3, options.signal);
 
   const failedWrites = writes.filter((result) => !result.ok);
   const deleteRows = preparedRows.filter((row) => row.state === "deleted" && row.rowId);
   let deletion = null;
   let deleteSkipped = false;
-  if (deleteRows.length) {
+  if (deleteRows.length && !options.signal?.aborted) {
     if (failedWrites.length) deleteSkipped = true;
     else {
       try {
@@ -110,7 +114,7 @@ export async function commitRows(rows, adapters, gateway, onProgress = () => {})
       onProgress({ completed: deleteRows.length, total: deleteRows.length, phase: "delete" });
     }
   }
-  return { validationErrors, writes, deletion, deleteSkipped, deleteRowIds: deleteRows.map((row) => row.rowId) };
+  return { validationErrors, writes, deletion, deleteSkipped, cancelled: Boolean(options.signal?.aborted), deleteRowIds: deleteRows.map((row) => row.rowId) };
 }
 
 export function applyCommitResult(rows, result) {
@@ -135,6 +139,7 @@ export function applyCommitResult(rows, result) {
         saveError: ""
       };
     }
+    if (write && write.outcome === "cancelled") return row;
     if (write && !write.ok) return {
       ...row,
       state: write.outcome === "unknown" ? "unknown" : "error",
@@ -152,10 +157,11 @@ export function applyCommitResult(rows, result) {
 }
 
 export function commitSummary(result) {
-  const summary = { add: { success: 0, failed: 0, unknown: 0 }, update: { success: 0, failed: 0, unknown: 0 }, delete: { success: 0, failed: 0, skipped: 0 } };
+  const summary = { add: { success: 0, failed: 0, unknown: 0, cancelled: 0 }, update: { success: 0, failed: 0, unknown: 0, cancelled: 0 }, delete: { success: 0, failed: 0, skipped: 0 }, cancelled: 0 };
   result.writes.forEach((entry) => {
     const target = summary[entry.operation || (entry.item.rowId ? "update" : "add")];
-    if (entry.ok) target.success += 1;
+    if (entry.outcome === "cancelled") { target.cancelled += 1; summary.cancelled += 1; }
+    else if (entry.ok) target.success += 1;
     else if (entry.outcome === "unknown") target.unknown += 1;
     else target.failed += 1;
   });
