@@ -7,8 +7,11 @@ import { applyCommitResult, commitRows, validateRows } from "./commit";
 import { clearDrafts, loadDrafts, saveDrafts } from "./drafts";
 import { createGateway, rowIdOf } from "./gateway";
 import { canUndo, createHistoryState, historyReducer } from "./history";
-import { createDraftRow, createServerRow, editRow, hasPendingChange, markDeleted, mergeRestoredDrafts, mergeServerPage, restoreDeleted } from "./rows";
+import { createDraftRow, createServerRow, editRow, hasPendingChange, markDeleted, mergeQueriedRows, mergeRestoredDrafts, mergeServerPage, restoreDeleted } from "./rows";
 import { clampCell, containsCell, moveSelection, selectionRange } from "./selection";
+import { buildFillChanges, fillPreviewMap } from "./fill";
+import { clampColumnWidth, clampRowHeight, DEFAULT_ROW_HEIGHT, layoutNeedsMigration, migrateRowHeights, normalizeLayout } from "./layout";
+import { buildNativeFilter, defaultFilterForControl, filterMapToList, filterOptionsForControl, mergeQueryParams } from "./query";
 
 const PAGE_SIZE = 100;
 const MAX_CELLS = 5000;
@@ -21,6 +24,107 @@ function selectedKeys(raw) {
 }
 
 function sameCell(a, b) { return a?.column === b?.column && a?.row === b?.row; }
+
+function filterValueText(value) {
+  if (Array.isArray(value)) return value.join(", ");
+  return String(value ?? "");
+}
+
+function FieldFilterForm({ control, adapter, initial, onApply, onClear }) {
+  const options = filterOptionsForControl(control);
+  const first = initial || defaultFilterForControl(control);
+  const [operator, setOperator] = useState(first.operator || options[0]?.key || "contains");
+  const [value, setValue] = useState(first.value ?? "");
+  const selectedOption = options.find((item) => item.key === operator) || options[0];
+  const mode = selectedOption?.valueMode || "text";
+  const choiceOptions = adapter?.options || [];
+  const selectedChoices = Array.isArray(value) ? value : [];
+  const toggleChoice = (key) => setValue((current) => {
+    const values = Array.isArray(current) ? current : [];
+    return values.includes(key) ? values.filter((item) => item !== key) : [...values, key];
+  });
+
+  function renderValueEditor() {
+    if (mode === "none") return <div className="filter-empty-hint">无需填写筛选值</div>;
+    if (mode === "choices") return <div className="filter-choice-list">
+      {choiceOptions.map((option) => <label key={option.key} className="filter-choice-item">
+        <input type="checkbox" checked={selectedChoices.includes(option.key)} onChange={() => toggleChoice(option.key)} />
+        <span>{option.value || option.label || option.key}</span>
+      </label>)}
+      {!choiceOptions.length && <input className="filter-input" value={filterValueText(value)} onChange={(event) => setValue(event.target.value.split(/[,，、]/).map((item) => item.trim()).filter(Boolean))} placeholder="输入选项 key，逗号分隔" />}
+    </div>;
+    if (mode === "range") return <div className="filter-range-inputs">
+      <input className="filter-input" type={control.type === 6 || control.type === 8 ? "number" : "date"} value={Array.isArray(value) ? value[0] || "" : ""} onChange={(event) => setValue([event.target.value, Array.isArray(value) ? value[1] || "" : ""])} placeholder="最小值" />
+      <span>至</span>
+      <input className="filter-input" type={control.type === 6 || control.type === 8 ? "number" : "date"} value={Array.isArray(value) ? value[1] || "" : ""} onChange={(event) => setValue([Array.isArray(value) ? value[0] || "" : "", event.target.value])} placeholder="最大值" />
+    </div>;
+    if (mode === "boolean") return <select className="filter-input" value={value === true || value === 1 ? "1" : "0"} onChange={(event) => setValue(event.target.value === "1")}>
+      <option value="1">是</option><option value="0">否</option>
+    </select>;
+    return <input
+      className="filter-input"
+      type={mode === "number" ? "number" : mode === "date" ? (Number(control.type) === 16 ? "datetime-local" : "date") : "text"}
+      value={filterValueText(value)}
+      onChange={(event) => setValue(event.target.value)}
+      placeholder={mode === "relation" ? "输入记录 ID，逗号分隔" : "请输入筛选值"}
+    />;
+  }
+
+  return <div className="field-filter-form">
+    <label className="filter-label">筛选条件<select className="filter-input" value={operator} onChange={(event) => { setOperator(event.target.value); setValue(""); }}>
+      {options.map((option) => <option key={option.key} value={option.key}>{option.label}</option>)}
+    </select></label>
+    {renderValueEditor()}
+    <div className="filter-actions">
+      <button type="button" className="ghost-button" onClick={onClear}>清除</button>
+      <button type="button" className="menu-primary" onClick={() => onApply({ operator, value })}>应用</button>
+    </div>
+  </div>;
+}
+
+function ColumnMenu({ column, control, adapter, position, queryFilter, sortId, isAsc, onSort, onFilter, onClearFilter, onClose }) {
+  const [mode, setMode] = useState("menu");
+  const sorted = sortId === control.controlId;
+  return <>
+    <button type="button" className="popover-scrim" aria-label="关闭字段菜单" onClick={onClose} />
+    <div className="column-menu" style={{ left: position.left, top: position.top }} onPointerDown={(event) => event.stopPropagation()}>
+      <div className="column-menu-title">{column.title}</div>
+      {mode === "menu"
+        ? <>
+          <button type="button" className={`column-menu-item ${sorted && isAsc ? "active" : ""}`} onClick={() => onSort(control.controlId, true)}>↥ 升序排序</button>
+          <button type="button" className={`column-menu-item ${sorted && !isAsc ? "active" : ""}`} onClick={() => onSort(control.controlId, false)}>↧ 降序排序</button>
+          <button type="button" className="column-menu-item" disabled={!sorted} onClick={() => onSort("", true)}>取消排序</button>
+          <div className="column-menu-divider" />
+          <button type="button" className={`column-menu-item ${queryFilter ? "active" : ""}`} onClick={() => setMode("filter")}>⌕ 筛选{queryFilter ? "（已设置）" : ""}</button>
+        </>
+        : <FieldFilterForm
+            control={control}
+            adapter={adapter}
+            initial={queryFilter}
+            onApply={(next) => { onFilter(control.controlId, next); onClose(); }}
+            onClear={() => { onClearFilter(control.controlId); onClose(); }}
+          />}
+    </div>
+  </>;
+}
+
+function rowIndexAtPoint(event, container) {
+  const cell = document.elementFromPoint(event.clientX, event.clientY)?.closest?.("td[data-grid-row]");
+  if (cell) return Number(cell.dataset.gridRow);
+  if (!container) return null;
+  const cells = [...container.querySelectorAll("td[data-grid-row]")];
+  if (!cells.length) return null;
+  const byRow = new Map(cells.map((item) => [Number(item.dataset.gridRow), item]));
+  const rowIndexes = [...byRow.keys()].sort((a, b) => a - b);
+  const firstRow = rowIndexes[0];
+  const lastRow = rowIndexes[rowIndexes.length - 1];
+  const first = byRow.get(firstRow)?.getBoundingClientRect?.();
+  const last = byRow.get(lastRow)?.getBoundingClientRect?.();
+  const rowHeight = Math.max(1, Number(first?.height || last?.height || 38));
+  if (last && event.clientY > last.bottom) return lastRow + Math.max(1, Math.ceil((event.clientY - last.bottom) / rowHeight));
+  if (first && event.clientY < first.top) return Math.max(0, firstRow - Math.ceil((first.top - event.clientY) / rowHeight));
+  return null;
+}
 
 function CellInputEditor({ adapter, raw, onCommit, onCancel, onMove }) {
   const inputRef = useRef(null);
@@ -137,8 +241,21 @@ export default function App() {
   const loadingMoreRef = useRef(false);
   const loadedServerCountRef = useRef(0);
   const filtersRef = useRef();
+  const externalFiltersRef = useRef({});
+  const queryRef = useRef({ sortId: "", isAsc: true, filterMap: {} });
+  const rowsRef = useRef([]);
+  const hydratedRef = useRef(false);
   const saveTimer = useRef(null);
   const draggingRef = useRef(false);
+  const fillDragRef = useRef(null);
+  const columnResizeRef = useRef(null);
+  const rowResizeRef = useRef(null);
+  const layoutSaveTimer = useRef(null);
+  const layoutSaveArmedRef = useRef(false);
+  const layoutMigrationPendingRef = useRef(false);
+  const latestLayoutRef = useRef({ columnWidths: {}, defaultRowHeight: DEFAULT_ROW_HEIGHT, rowHeights: {} });
+  const layoutDirtyRef = useRef(false);
+  const layoutRevisionRef = useRef(0);
   const [rowHistory, dispatchRows] = useReducer(historyReducer, [], createHistoryState);
   const rows = rowHistory.value;
   const setRows = useCallback((update, options = {}) => {
@@ -159,12 +276,25 @@ export default function App() {
   const [selectedRows, setSelectedRows] = useState([]);
   const [cellSelection, setCellSelection] = useState(null);
   const [editingCell, setEditingCell] = useState(null);
+  const [fillDrag, setFillDrag] = useState(null);
   const [picker, setPicker] = useState(null);
   const [refreshPending, setRefreshPending] = useState(false);
   const [columnWidths, setColumnWidths] = useState({});
+  const [rowHeights, setRowHeights] = useState({});
+  const [defaultRowHeight, setDefaultRowHeight] = useState(DEFAULT_ROW_HEIGHT);
+  const [layoutReady, setLayoutReady] = useState(false);
+  const [layoutStatus, setLayoutStatus] = useState("");
+  const [columnMenu, setColumnMenu] = useState(null);
+  const [resizing, setResizing] = useState(null);
+  const [queryState, setQueryState] = useState({ sortId: "", isAsc: true, filterMap: {} });
   const [saveProgress, setSaveProgress] = useState(null);
   const [hydrated, setHydrated] = useState(false);
   const hydratingRelationsRef = useRef(new Set());
+
+  rowsRef.current = rows;
+  hydratedRef.current = hydrated;
+  queryRef.current = queryState;
+  latestLayoutRef.current = { columnWidths, defaultRowHeight, rowHeights };
 
   useEffect(() => {
     if (rowHistory.conflict) setMessage("撤销已取消：数据已被外部刷新");
@@ -233,10 +363,12 @@ export default function App() {
     return {
       id: control.controlId,
       title,
-      width: columnWidths[control.controlId] || Math.max(120, Math.min(260, title.length * 15 + 48)),
+      width: columnWidths[control.controlId] || clampColumnWidth(Math.max(120, Math.min(260, title.length * 15 + 48))),
       grow: 0
     };
   }), [controls, columnWidths]);
+
+  const rowHeightFor = useCallback((row) => rowHeights[row?.key] || defaultRowHeight, [defaultRowHeight, rowHeights]);
 
   const pending = useMemo(() => rows.reduce((summary, row) => {
     if (!hasPendingChange(row)) return summary;
@@ -248,22 +380,75 @@ export default function App() {
   }, { added: 0, modified: 0, deleted: 0, errors: 0 }), [rows]);
   const hasDrafts = pending.added + pending.modified + pending.deleted > 0;
   const loadedCount = rows.filter((row) => row.rowId).length;
+  const fillSourceRange = selectionRange(cellSelection);
+  const fillHandleEnabled = Boolean(
+    fillSourceRange
+    && !editingCell
+    && !picker
+    && loadState !== "saving"
+    && adapters.slice(fillSourceRange.left, fillSourceRange.right + 1).every((adapter) => adapter?.writable && adapter.kind !== "readonly")
+    && rows.slice(fillSourceRange.top, fillSourceRange.bottom + 1).every((row) => row && row.state !== "deleted")
+  );
+  const fillResult = useMemo(() => {
+    if (!fillDrag) return null;
+    return buildFillChanges({
+      sourceRange: fillDrag.sourceRange,
+      targetRow: fillDrag.targetRow,
+      rows,
+      adapters,
+      maxCells: MAX_CELLS,
+      maxNewRows: MAX_NEW_ROWS
+    });
+  }, [adapters, fillDrag, rows]);
+  const fillPreviewCells = useMemo(() => fillPreviewMap(fillResult?.previewValues), [fillResult]);
+  const previewBottom = fillResult?.targetRange?.bottom ?? -1;
+  const renderedRowCount = Math.max(rows.length, Math.min(rows.length + MAX_NEW_ROWS, previewBottom + 1));
+  const renderRows = useMemo(() => {
+    if (renderedRowCount <= rows.length) return rows;
+    const previews = [];
+    for (let rowIndex = rows.length; rowIndex < renderedRowCount; rowIndex += 1) {
+      previews.push({
+        key: `fill-preview-${rowIndex}`,
+        rowId: null,
+        serverSnapshot: {},
+        values: Object.fromEntries(allControls.map((control) => [control.controlId, ""])),
+        dirtyFields: [],
+        cellErrors: {},
+        state: "preview",
+        saveError: ""
+      });
+    }
+    return [...rows, ...previews];
+  }, [allControls, renderedRowCount, rows]);
 
   const loadInitial = useCallback(async (filters) => {
     const request = ++requestRef.current;
-    filtersRef.current = filters;
+    filtersRef.current = filters || {};
     setLoadState("loading");
     setMessage("正在加载记录…");
     setPicker(null);
+    setColumnMenu(null);
     try {
       const [records, count] = await Promise.all([
-        gateway.loadPage({ pageIndex: 1, pageSize: PAGE_SIZE, filters }),
-        gateway.loadTotal(filters)
+        gateway.loadPage({ pageIndex: 1, pageSize: PAGE_SIZE, filters: filtersRef.current }),
+        gateway.loadTotal(filtersRef.current)
       ]);
       if (request !== requestRef.current) return;
+      const currentRows = rowsRef.current;
       const serverRows = records.map((record) => createServerRow(record, allControls));
-      const restored = loadDrafts(runtimeConfig, allControls);
-      setRows(mergeRestoredDrafts(serverRows, restored.rows, allControls), { clearHistory: true });
+      const restored = hydratedRef.current ? { rows: [], incompatible: false, migrated: false } : loadDrafts(runtimeConfig, allControls);
+      const nextRows = hydratedRef.current
+        ? mergeQueriedRows(currentRows, records, allControls)
+        : mergeRestoredDrafts(serverRows, restored.rows, allControls);
+      setRows(nextRows, { clearHistory: true });
+      if (!hydratedRef.current) {
+        layoutMigrationPendingRef.current = layoutNeedsMigration(runtimeConfig.view);
+        const savedLayout = normalizeLayout(runtimeConfig.view, controls);
+        setColumnWidths(savedLayout.columnWidths);
+        setDefaultRowHeight(savedLayout.defaultRowHeight);
+        setRowHeights(savedLayout.rowHeights);
+        setLayoutReady(true);
+      }
       setTotal(count ?? (records.length < PAGE_SIZE ? records.length : null));
       setHasMore(count == null ? records.length === PAGE_SIZE : records.length < count);
       loadedServerCountRef.current = records.length;
@@ -272,6 +457,7 @@ export default function App() {
       setHydrated(true);
       if (restored.incompatible) setMessage("字段结构已变化，旧草稿未套用；放弃草稿后可清理");
       else if (restored.rows.length) setMessage(`已恢复 ${restored.rows.length} 条草稿${restored.migrated ? "（已升级）" : ""}`);
+      else if (currentRows.some(hasPendingChange)) setMessage(`已刷新 ${records.length} 条记录，保留 ${currentRows.filter(hasPendingChange).length} 条本地草稿`);
       else if (columnConfig.source === "fallback-invalid") setMessage(`显示字段配置已失效，已回退为业务字段（${columnConfig.invalidIds.length} 个字段不可用）`);
       else setMessage(`已加载 ${records.length} 条记录`);
     } catch (error) {
@@ -279,7 +465,17 @@ export default function App() {
       setLoadState("failed");
       setMessage(`加载失败：${error?.message || "请检查视图权限或网络"}`);
     }
-  }, [allControls, columnConfig.invalidIds.length, columnConfig.source, gateway, runtimeConfig]);
+  }, [allControls, columnConfig.invalidIds.length, columnConfig.source, controls, gateway, runtimeConfig, setRows]);
+
+  const composeQuery = useCallback((externalFilters = {}, nextQuery = queryRef.current) => mergeQueryParams(externalFilters, {
+    sortId: nextQuery.sortId,
+    isAsc: nextQuery.isAsc,
+    filters: filterMapToList(nextQuery.filterMap, controls)
+  }), [controls]);
+  const reloadWithQuery = useCallback((externalFilters = externalFiltersRef.current, nextQuery = queryRef.current) => {
+    externalFiltersRef.current = externalFilters || {};
+    return loadInitial(composeQuery(externalFiltersRef.current, nextQuery));
+  }, [composeQuery, loadInitial]);
 
   const loadNext = useCallback(async () => {
     if (!hasMore || loadingMoreRef.current || loadState !== "ready") return;
@@ -302,21 +498,96 @@ export default function App() {
     }
   }, [allControls, gateway, hasMore, loadState, rows, total]);
 
-  useEffect(() => { loadInitial(); }, [loadInitial]);
+  useEffect(() => { reloadWithQuery({}); }, [reloadWithQuery]);
   useEffect(() => gateway.on("filters-update", (filters) => {
-    if (rows.some(hasPendingChange)) setRefreshPending(true);
-    else loadInitial(filters);
-  }), [gateway, loadInitial, rows]);
+    reloadWithQuery(filters || {}, queryRef.current);
+  }), [gateway, reloadWithQuery]);
   useEffect(() => gateway.on("new-record", () => {
-    if (rows.some(hasPendingChange)) setRefreshPending(true);
-    else loadInitial(filtersRef.current);
-  }), [gateway, loadInitial, rows]);
+    reloadWithQuery(externalFiltersRef.current, queryRef.current);
+  }), [gateway, reloadWithQuery]);
   useEffect(() => {
     if (!hydrated) return undefined;
     clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => saveDrafts(runtimeConfig, allControls, rows), 300);
     return () => clearTimeout(saveTimer.current);
   }, [allControls, hydrated, rows, runtimeConfig]);
+
+  useEffect(() => {
+    if (!layoutReady) return undefined;
+    const shouldMigrate = layoutMigrationPendingRef.current;
+    const revision = layoutRevisionRef.current + 1;
+    layoutRevisionRef.current = revision;
+    if (!layoutSaveArmedRef.current) {
+      layoutSaveArmedRef.current = true;
+      if (!shouldMigrate) return undefined;
+    }
+    layoutDirtyRef.current = true;
+    clearTimeout(layoutSaveTimer.current);
+    setLayoutStatus(shouldMigrate ? "布局格式修复中" : "布局待保存");
+    layoutSaveTimer.current = setTimeout(async () => {
+      try {
+        await gateway.saveViewLayout(runtimeConfig.view || {}, { columnWidths, defaultRowHeight, rowHeights });
+        if (layoutRevisionRef.current === revision) {
+          layoutDirtyRef.current = false;
+          layoutMigrationPendingRef.current = false;
+          setLayoutStatus("布局已保存");
+        }
+      } catch (error) {
+        if (layoutRevisionRef.current === revision) {
+          if (shouldMigrate) layoutMigrationPendingRef.current = true;
+          setLayoutStatus("布局保存失败");
+          setMessage(`布局保存失败：${error?.message || "请稍后重试"}`);
+        }
+      }
+    }, 500);
+    return () => clearTimeout(layoutSaveTimer.current);
+  }, [columnWidths, defaultRowHeight, gateway, layoutReady, rowHeights, runtimeConfig.view]);
+
+  useEffect(() => () => {
+    clearTimeout(layoutSaveTimer.current);
+    if (!layoutReady || !layoutSaveArmedRef.current || !layoutDirtyRef.current) return;
+    gateway.saveViewLayout(runtimeConfig.view || {}, latestLayoutRef.current).catch(() => {});
+  }, [gateway, layoutReady, runtimeConfig.view]);
+
+  const applyQueryState = useCallback((nextQuery, statusMessage) => {
+    queryRef.current = nextQuery;
+    setQueryState(nextQuery);
+    setCellSelection(null);
+    setEditingCell(null);
+    setPicker(null);
+    reloadWithQuery(externalFiltersRef.current, nextQuery);
+    if (statusMessage) setMessage(statusMessage);
+  }, [reloadWithQuery]);
+
+  const applySort = useCallback((sortId, isAsc) => {
+    const next = { ...queryRef.current, sortId, isAsc: Boolean(isAsc) };
+    applyQueryState(next, sortId ? `正在按${isAsc ? "升序" : "降序"}加载…` : "正在取消排序…");
+    setColumnMenu(null);
+  }, [applyQueryState]);
+
+  const applyFilter = useCallback((fieldId, filter) => {
+    const nextMap = { ...queryRef.current.filterMap };
+    if (buildNativeFilter({ control: controls.find((control) => control.controlId === fieldId), operator: filter.operator, value: filter.value })) nextMap[fieldId] = filter;
+    else delete nextMap[fieldId];
+    applyQueryState({ ...queryRef.current, filterMap: nextMap }, "正在应用筛选…");
+  }, [applyQueryState, controls]);
+
+  const clearFilter = useCallback((fieldId) => {
+    const nextMap = { ...queryRef.current.filterMap };
+    delete nextMap[fieldId];
+    applyQueryState({ ...queryRef.current, filterMap: nextMap }, "正在清除筛选…");
+  }, [applyQueryState]);
+
+  const openColumnMenu = useCallback((event, column) => {
+    event.preventDefault();
+    event.stopPropagation();
+    const bounds = event.currentTarget.getBoundingClientRect();
+    setColumnMenu({
+      fieldId: column.id,
+      left: Math.max(8, Math.min(window.innerWidth - 292, bounds.left)),
+      top: Math.min(window.innerHeight - 360, bounds.bottom + 4)
+    });
+  }, []);
 
   const applyChanges = useCallback((changes, label = "编辑单元格") => {
     setRows((current) => {
@@ -334,6 +605,64 @@ export default function App() {
       return next;
     }, { record: true, label });
   }, [adapters, allControls, setRows]);
+
+  const beginFillDrag = useCallback((event) => {
+    if (event.button !== 0 || !fillHandleEnabled || !fillSourceRange) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const sourceSelection = cellSelection;
+    fillDragRef.current = {
+      pointerId: event.pointerId,
+      sourceRange: fillSourceRange,
+      targetRow: fillSourceRange.bottom
+    };
+    setEditingCell(null);
+    setFillDrag({
+      sourceRange: fillSourceRange,
+      targetRow: fillSourceRange.bottom
+    });
+    gridRef.current?.focus?.({ preventScroll: true });
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+    if (sourceSelection) setCellSelection(sourceSelection);
+  }, [cellSelection, fillHandleEnabled, fillSourceRange]);
+
+  const cancelFillDrag = useCallback(() => {
+    if (!fillDragRef.current) return;
+    fillDragRef.current = null;
+    setFillDrag(null);
+    setMessage("已取消拖拽填充");
+  }, []);
+
+  const finishFillDrag = useCallback(() => {
+    const drag = fillDragRef.current;
+    if (!drag) return;
+    fillDragRef.current = null;
+    setFillDrag(null);
+    const result = buildFillChanges({
+      sourceRange: drag.sourceRange,
+      targetRow: drag.targetRow,
+      rows,
+      adapters,
+      maxCells: MAX_CELLS,
+      maxNewRows: MAX_NEW_ROWS
+    });
+    if (result.fatal) {
+      setMessage(result.fatal);
+      return;
+    }
+    if (!result.changes.length) {
+      setMessage(result.errors.length ? result.errors[0].error : "拖拽范围未超出源选区");
+      return;
+    }
+    applyChanges(result.changes, "拖拽填充");
+    setCellSelection({
+      anchor: { column: result.targetRange.left, row: result.targetRange.top },
+      focus: { column: result.targetRange.right, row: result.targetRange.bottom }
+    });
+    setMessage(result.errors.length
+      ? `已填充 ${result.changes.length} 个单元格，跳过 ${result.errors.length} 个不可填充单元格`
+      : `已填充 ${result.changes.length} 个单元格`);
+  }, [adapters, applyChanges, rows]);
 
   const selectCell = useCallback((cell, extend = false) => {
     setEditingCell(null);
@@ -431,6 +760,10 @@ export default function App() {
   }, [gateway, loadInitial, rows]);
 
   const handleGridKeyDown = useCallback((event) => {
+    if (fillDrag) {
+      if (event.key === "Escape") { event.preventDefault(); cancelFillDrag(); }
+      return;
+    }
     if (editingCell || !cellSelection) return;
     const keyMoves = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
     if (keyMoves[event.key]) {
@@ -441,7 +774,7 @@ export default function App() {
       const cell = cellSelection.focus;
       beginEdit(cell, document.querySelector(`[data-grid-row="${cell.row}"][data-grid-column="${cell.column}"]`));
     }
-  }, [beginEdit, cellSelection, editingCell, moveCellSelection]);
+  }, [beginEdit, cancelFillDrag, cellSelection, editingCell, fillDrag, moveCellSelection]);
 
   const handleUndoKeyDown = useCallback((event) => {
     const key = String(event.key || "").toLowerCase();
@@ -455,10 +788,57 @@ export default function App() {
     undoRows();
   }, [loadState, picker, rowHistory, undoRows]);
 
+  const beginColumnResize = useCallback((event, fieldId) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const column = columns.find((item) => item.id === fieldId);
+    if (!column) return;
+    columnResizeRef.current = { fieldId, startX: event.clientX, startWidth: column.width };
+    setResizing(`column:${fieldId}`);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }, [columns]);
+
+  const beginRowResize = useCallback((event, row) => {
+    if (event.button !== 0 || !row || row.state === "preview") return;
+    event.preventDefault();
+    event.stopPropagation();
+    rowResizeRef.current = { rowKey: row.key, startY: event.clientY, startHeight: rowHeightFor(row) };
+    setResizing(`row:${row.key}`);
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }, [rowHeightFor]);
+
+  const finishResize = useCallback(() => {
+    columnResizeRef.current = null;
+    rowResizeRef.current = null;
+    setResizing(null);
+  }, []);
+
   const handleGridPointerMove = useCallback((event) => {
-    if (!draggingRef.current) return;
-    const cell = document.elementFromPoint(event.clientX, event.clientY)?.closest?.("td[data-grid-row]");
-    if (cell) setCellSelection((current) => current ? { ...current, focus: { column: Number(cell.dataset.gridColumn), row: Number(cell.dataset.gridRow) } } : current);
+    if (columnResizeRef.current) {
+      const resize = columnResizeRef.current;
+      const width = clampColumnWidth(resize.startWidth + event.clientX - resize.startX, resize.startWidth);
+      setColumnWidths((current) => current[resize.fieldId] === width ? current : { ...current, [resize.fieldId]: width });
+      return;
+    }
+    if (rowResizeRef.current) {
+      const resize = rowResizeRef.current;
+      const height = clampRowHeight(resize.startHeight + event.clientY - resize.startY, resize.startHeight);
+      setRowHeights((current) => current[resize.rowKey] === height ? current : { ...current, [resize.rowKey]: height });
+      return;
+    }
+    if (fillDragRef.current) {
+      const targetRow = rowIndexAtPoint(event, gridRef.current);
+      if (targetRow !== null && Number.isFinite(targetRow)) {
+        fillDragRef.current.targetRow = targetRow;
+        setFillDrag((current) => current && current.targetRow === targetRow ? current : current ? { ...current, targetRow } : current);
+      }
+    }
+    if (!draggingRef.current && !fillDragRef.current) return;
+    if (draggingRef.current) {
+      const cell = document.elementFromPoint(event.clientX, event.clientY)?.closest?.("td[data-grid-row]");
+      if (cell) setCellSelection((current) => current ? { ...current, focus: { column: Number(cell.dataset.gridColumn), row: Number(cell.dataset.gridRow) } } : current);
+    }
     const container = gridRef.current;
     if (!container) return;
     const bounds = container.getBoundingClientRect();
@@ -470,16 +850,17 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    const stopDragging = () => { draggingRef.current = false; };
+    const stopDragging = () => { draggingRef.current = false; finishResize(); finishFillDrag(); };
+    const cancelDragging = () => { draggingRef.current = false; finishResize(); cancelFillDrag(); };
     window.addEventListener("pointermove", handleGridPointerMove);
     window.addEventListener("pointerup", stopDragging);
-    window.addEventListener("pointercancel", stopDragging);
+    window.addEventListener("pointercancel", cancelDragging);
     return () => {
       window.removeEventListener("pointermove", handleGridPointerMove);
       window.removeEventListener("pointerup", stopDragging);
-      window.removeEventListener("pointercancel", stopDragging);
+      window.removeEventListener("pointercancel", cancelDragging);
     };
-  }, [handleGridPointerMove]);
+  }, [cancelFillDrag, finishFillDrag, finishResize, handleGridPointerMove]);
 
   function addRow() {
     const draft = createDraftRow(allControls);
@@ -529,6 +910,7 @@ export default function App() {
       setMessage(progress.phase === "delete" ? "正在删除记录…" : `正在保存 ${progress.completed}/${progress.total}…`);
     });
     const next = applyCommitResult(rows, result);
+    setRowHeights((current) => migrateRowHeights(current, result));
     const failedWrites = result.writes.filter((entry) => !entry.ok).length;
     const failed = failedWrites + (result.deletion && !result.deletion.ok ? result.deletion.rowIds.length : 0);
     const remoteMutation = result.writes.some((entry) => entry.ok) || Boolean(result.deletion?.ok);
@@ -558,6 +940,9 @@ export default function App() {
   const pickerAdapter = picker ? adapters[picker.columnIndex] : null;
   const pickerRow = picker ? rows[picker.rowIndex] : null;
   const cellSelectionRange = selectionRange(cellSelection);
+  const menuColumn = columnMenu ? columns.find((column) => column.id === columnMenu.fieldId) : null;
+  const menuControl = columnMenu ? controls.find((control) => control.controlId === columnMenu.fieldId) : null;
+  const menuAdapter = columnMenu ? adapters.find((adapter) => adapter.control.controlId === columnMenu.fieldId) : null;
 
   return <div className="table-app" onKeyDown={handleUndoKeyDown}>
     <header className="table-toolbar">
@@ -600,15 +985,25 @@ export default function App() {
               <table className="native-grid">
                 <thead><tr>
                   <th className="row-marker"><input type="checkbox" aria-label="选择全部记录" checked={rows.length > 0 && selectedRows.length === rows.length} onChange={(event) => setSelectedRows(event.target.checked ? rows.map((row) => row.key) : [])} /></th>
-                  {columns.map((column) => <th key={column.id} style={{ width: column.width, minWidth: column.width }}>{column.title}</th>)}
+                  {columns.map((column) => <th key={column.id} className={queryState.sortId === column.id || queryState.filterMap[column.id] ? "header-active" : ""} style={{ width: column.width, minWidth: column.width }}>
+                    <span className="header-title">{column.title}</span>
+                    {queryState.sortId === column.id && <span className="sort-indicator">{queryState.isAsc ? "↑" : "↓"}</span>}
+                    {queryState.filterMap[column.id] && <span className="filter-indicator" title="已设置筛选">●</span>}
+                    <button type="button" className="column-menu-trigger" aria-label={`打开${column.title}菜单`} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => openColumnMenu(event, column)}>⌄</button>
+                    <span className={`column-resize-handle ${resizing === `column:${column.id}` ? "active" : ""}`} aria-hidden="true" onPointerDown={(event) => beginColumnResize(event, column.id)} />
+                  </th>)}
                 </tr></thead>
-                <tbody>{rows.map((row, rowIndex) => <tr key={row.key} data-row-key={row.key} className={`row-${row.state}`}>
-                  <td className="row-marker"><input type="checkbox" aria-label={`选择第 ${rowIndex + 1} 行`} checked={selectedRows.includes(row.key)} onChange={(event) => setSelectedRows((current) => event.target.checked ? [...new Set([...current, row.key])] : current.filter((item) => item !== row.key))} /><span>{rowIndex + 1}</span></td>
+                <tbody>{renderRows.map((row, rowIndex) => {
+                  const previewRow = row.state === "preview";
+                  const rowHeight = rowHeightFor(row);
+                  return <tr key={row.key} data-row-key={row.key} className={`row-${row.state}`} style={{ height: rowHeight }} aria-hidden={previewRow || undefined}>
+                  <td className="row-marker" style={{ height: rowHeight }}>{!previewRow && <input type="checkbox" aria-label={`选择第 ${rowIndex + 1} 行`} checked={selectedRows.includes(row.key)} onChange={(event) => setSelectedRows((current) => event.target.checked ? [...new Set([...current, row.key])] : current.filter((item) => item !== row.key))} />}<span>{rowIndex + 1}</span>{!previewRow && <span className={`row-resize-handle ${resizing === `row:${row.key}` ? "active" : ""}`} aria-label="调整行高" title="拖拽调整行高" onPointerDown={(event) => beginRowResize(event, row)} />}</td>
                   {adapters.map((adapter, columnIndex) => {
                     const fieldId = adapter.control.controlId;
-                    const raw = row.values[fieldId];
+                    const previewValue = fillPreviewCells.get(`${rowIndex}:${columnIndex}`);
+                    const raw = previewValue ? previewValue.value : row.values[fieldId];
                     const disabled = !adapter.writable || row.state === "deleted";
-                    const error = row.cellErrors[fieldId];
+                    const error = previewValue ? "" : row.cellErrors[fieldId];
                     const cell = { column: columnIndex, row: rowIndex };
                     const active = sameCell(cellSelection?.focus, cell);
                     const selected = containsCell(cellSelection, columnIndex, rowIndex);
@@ -622,17 +1017,23 @@ export default function App() {
                     const display = adapter.kind === "checkbox" ? (raw ? "✓" : "") : adapter.display(raw);
                     const optionTags = ["select", "multiSelect"].includes(adapter.kind) ? adapter.optionTags(raw) : [];
                     const relationItems = adapter.relationLinks(raw);
+                    const showFillHandle = fillHandleEnabled
+                      && !fillDrag
+                      && !previewRow
+                      && cellSelectionRange?.right === columnIndex
+                      && cellSelectionRange?.bottom === rowIndex;
                     return <td
                       key={fieldId}
+                      style={{ height: rowHeight }}
                       data-grid-row={rowIndex}
                       data-grid-column={columnIndex}
                       role="gridcell"
                       aria-selected={selected}
                       aria-readonly={disabled}
-                      className={[error && "cell-error", selected && "cell-selected", ...selectionEdges, active && "cell-active", editing && "cell-editing", disabled && "cell-disabled"].filter(Boolean).join(" ")}
-                      title={error || display}
+                      className={[error && "cell-error", selected && "cell-selected", previewValue && "cell-fill-preview", ...selectionEdges, active && "cell-active", editing && "cell-editing", disabled && "cell-disabled"].filter(Boolean).join(" ")}
+                      title={error || (previewValue ? `预览：${display}` : display)}
                       onPointerDown={(event) => {
-                        if (event.button !== 0 || editing) return;
+                        if (previewRow || event.button !== 0 || editing) return;
                         event.preventDefault();
                         draggingRef.current = true;
                         selectCell(cell, event.shiftKey);
@@ -657,15 +1058,24 @@ export default function App() {
                               ? <RelationDisplay
                                   links={relationItems}
                                   fallback={display}
-                                  canOpen={row.state !== "deleted"}
+                                  canOpen={!previewRow && row.state !== "deleted"}
                                   onOpen={(relation) => openRelationRecord(adapter, relation)}
                                 />
                               : display || (!disabled && ["select", "multiSelect", "member", "relation"].includes(adapter.kind) ? <span className="cell-placeholder">请选择</span> : "")}
                           </div>}
                       {error && <small>{error}</small>}
+                      {showFillHandle && <button
+                        type="button"
+                        className="fill-handle"
+                        aria-label="拖拽填充"
+                        title="拖拽填充"
+                        tabIndex={-1}
+                        onPointerDown={beginFillDrag}
+                      />}
                     </td>;
                   })}
-                </tr>)}</tbody>
+                </tr>;
+                })}</tbody>
               </table>
               <button type="button" className="append-row" onClick={addRow}>＋ 新增记录</button>
             </div>}
@@ -673,9 +1083,23 @@ export default function App() {
     </main>
 
     <footer className="table-footer">
-      <span>{total == null ? `已加载 ${loadedCount} 条` : `已加载 ${loadedCount} / 共 ${total} 条`}{hasMore ? " · 向下滚动继续加载" : " · 已全部加载"}</span>
-      <span>拖拽或 Shift 扩展选区 · Ctrl/Cmd+C/V 批量复制粘贴 · Ctrl/Cmd+Z 撤销 · Enter/F2 编辑</span>
+      <span>{total == null ? `已加载 ${loadedCount} 条` : `已加载 ${loadedCount} / 共 ${total} 条`}{hasMore ? " · 向下滚动继续加载" : " · 已全部加载"}{layoutStatus ? ` · ${layoutStatus}` : ""}</span>
+      <span>拖拽或 Shift 扩展选区 · 右下角填充柄上下拖拽复制 · Ctrl/Cmd+C/V 批量复制粘贴 · Ctrl/Cmd+Z 撤销 · Enter/F2 编辑</span>
     </footer>
+
+    {columnMenu && menuColumn && menuControl && menuAdapter && <ColumnMenu
+      column={menuColumn}
+      control={menuControl}
+      adapter={menuAdapter}
+      position={columnMenu}
+      queryFilter={queryState.filterMap[menuControl.controlId]}
+      sortId={queryState.sortId}
+      isAsc={queryState.isAsc}
+      onSort={applySort}
+      onFilter={applyFilter}
+      onClearFilter={clearFilter}
+      onClose={() => setColumnMenu(null)}
+    />}
 
     {picker && pickerAdapter && pickerRow && <ChoicePopover
       picker={picker}

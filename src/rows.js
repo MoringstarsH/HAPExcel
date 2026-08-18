@@ -94,6 +94,20 @@ export function mergeServerPage(currentRows, records, columns) {
   return [...refreshedExisting, ...incoming.filter((row) => !existingById.has(row.rowId)), ...newDrafts];
 }
 
+/**
+ * Replace the server portion after a new query while keeping every local draft.
+ * Pending rows are deliberately placed first so a filter cannot make an edit
+ * disappear from the working surface.
+ */
+export function mergeQueriedRows(currentRows, records, columns) {
+  const pending = currentRows.filter(hasPendingChange);
+  const pendingIds = new Set(pending.filter((row) => row.rowId).map((row) => row.rowId));
+  const serverRows = records
+    .map((record) => createServerRow(record, columns))
+    .filter((row) => !pendingIds.has(row.rowId));
+  return [...pending, ...serverRows];
+}
+
 export function mergeRestoredDrafts(serverRows, draftRows, columns) {
   const draftById = new Map(draftRows.filter((row) => row.rowId).map((row) => [row.rowId, row]));
   const merged = serverRows.map((row) => {

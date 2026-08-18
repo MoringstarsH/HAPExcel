@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createDraftRow, editRow, mergeRestoredDrafts, mergeServerPage } from "./rows";
+import { createDraftRow, editRow, mergeQueriedRows, mergeRestoredDrafts, mergeServerPage } from "./rows";
 
 const columns = [{ controlId: "name" }];
 
@@ -22,5 +22,15 @@ describe("row model", () => {
     const initial = [{ key: "1", rowId: "1", state: "clean", values: { name: "A" }, dirtyFields: [], cellErrors: {}, serverSnapshot: { rowid: "1" } }];
     const merged = mergeServerPage(initial, [{ rowid: "1", name: "A" }, { rowid: "2", name: "B" }], columns);
     expect(merged.map((row) => row.rowId)).toEqual(["1", "2"]);
+  });
+
+  it("keeps pending rows visible when a query changes", () => {
+    const edited = editRow({
+      key: "1", rowId: "1", state: "clean", values: { name: "旧" },
+      dirtyFields: [], cellErrors: {}, serverSnapshot: { rowid: "1" }
+    }, "name", "本地修改", null);
+    const draft = { ...createDraftRow(columns), values: { name: "新增草稿" }, dirtyFields: ["name"] };
+    const merged = mergeQueriedRows([edited, draft], [{ rowid: "2", name: "服务端结果" }], columns);
+    expect(merged.map((row) => row.values.name)).toEqual(["本地修改", "新增草稿", "服务端结果"]);
   });
 });

@@ -1,4 +1,5 @@
-import { api, md_emitter, utils } from "mdye";
+import { api, apis, md_emitter, utils } from "mdye";
+import { LAYOUT_NAMESPACE, layoutToAdvancedSetting } from "./layout";
 
 const worksheetMetaCache = new Map();
 
@@ -72,6 +73,9 @@ export function createGateway({ appId, worksheetId, viewId }) {
     async add(values) { return api.addWorksheetRow({ appId, worksheetId, receiveControls: values }); },
     async update(rowId, values) { return api.updateWorksheetRow({ appId, worksheetId, rowId, newOldControl: values }); },
     async deleteRows(rowIds) { return api.deleteWorksheetRow({ appId, worksheetId, rowIds }); },
+    async saveViewLayout(view, layout) {
+      return apis.worksheet.saveWorksheetView(buildViewLayoutPayload({ view, layout, appId, worksheetId, viewId }));
+    },
     async selectUsers(control) { return utils.selectUsers({ unique: Number(control?.enumDefault) === 1 }); },
     async selectRelation(control) {
       const multiple = !(Number(control?.enumDefault) === 1 || Number(control?.subType) === 1);
@@ -127,3 +131,15 @@ export function createGateway({ appId, worksheetId, viewId }) {
 }
 
 export function rowIdOf(row) { return row?.rowid || row?.rowId || row?.id || null; }
+
+export function buildViewLayoutPayload({ view = {}, appId = "", worksheetId = "", viewId = "", layout } = {}) {
+  const editAdKeys = Array.isArray(view.editAdKeys) ? view.editAdKeys : [];
+  return {
+    ...view,
+    appId: appId || view.appId,
+    worksheetId: worksheetId || view.worksheetId,
+    viewId: viewId || view.viewId,
+    editAdKeys: [...new Set([...editAdKeys, LAYOUT_NAMESPACE])],
+    advancedSetting: layoutToAdvancedSetting(view, layout)
+  };
+}

@@ -196,6 +196,15 @@ function serializeValue(value, control) {
   return value ?? "";
 }
 
+function copyValue(value) {
+  if (value === null || value === undefined || typeof value !== "object") return value;
+  if (typeof globalThis.structuredClone === "function") {
+    try { return globalThis.structuredClone(value); } catch (_) { /* use recursive fallback */ }
+  }
+  if (Array.isArray(value)) return value.map(copyValue);
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, copyValue(item)]));
+}
+
 export function createFieldAdapter(control = {}) {
   const kind = getFieldKind(control);
   return {
@@ -212,6 +221,7 @@ export function createFieldAdapter(control = {}) {
     parseClipboard: (input) => parseInput(input, control),
     validate: (value, required = Boolean(control.required)) => validateValue(value, control, required),
     equals: (a, b) => JSON.stringify(a) === JSON.stringify(b),
+    copyValue,
     serialize: (value) => serializeValue(value, control)
   };
 }
