@@ -141,13 +141,14 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 
 .native-grid {
   table-layout: fixed;
-  width: max-content;
+  width: 100%;
   min-width: 100%;
   border-collapse: separate;
   border-spacing: 0;
   color: #1f2329;
   font-size: 14px;
 }
+.native-grid col { min-width: 0; }
 
 .native-grid th,
 .native-grid td {
@@ -155,6 +156,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   box-sizing: border-box;
   padding: 0;
   overflow: hidden;
+  min-width: 0;
   border-right: 1px solid #dfe1e6;
   border-bottom: 1px solid #dfe1e6;
   background: #fff;
@@ -170,7 +172,8 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   color: #373c43;
   background: #f5f6f7;
   font-weight: 650;
-  overflow: visible;
+  overflow: hidden;
+  min-width: 0;
 }
 
 .native-grid th:not(.row-marker) {
@@ -178,6 +181,8 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   padding-right: 34px;
 }
 .header-title {
+  display: block;
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -208,7 +213,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   position: absolute;
   z-index: 5;
   top: 0;
-  right: -4px;
+  right: 0;
   bottom: 0;
   width: 9px;
   cursor: col-resize;
@@ -267,6 +272,13 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   text-overflow: ellipsis;
   white-space: nowrap;
   font: inherit;
+}
+.native-grid .cell-text {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .native-grid .cell-display { cursor: cell; }

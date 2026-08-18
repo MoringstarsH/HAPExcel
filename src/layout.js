@@ -1,5 +1,6 @@
 export const LAYOUT_NAMESPACE = "hapExcelLayout";
-export const MIN_COLUMN_WIDTH = 100;
+export const ROW_MARKER_WIDTH = 48;
+export const MIN_COLUMN_WIDTH = 48;
 export const MAX_COLUMN_WIDTH = 640;
 export const MIN_ROW_HEIGHT = 28;
 export const MAX_ROW_HEIGHT = 240;
@@ -13,6 +14,15 @@ function numberInRange(value, fallback, min, max) {
 
 export function clampColumnWidth(value, fallback = 160) {
   return numberInRange(value, fallback, MIN_COLUMN_WIDTH, MAX_COLUMN_WIDTH);
+}
+
+export function gridWidthOf(columns = [], rowMarkerWidth = ROW_MARKER_WIDTH) {
+  const markerWidth = Number(rowMarkerWidth);
+  return (Number.isFinite(markerWidth) ? Math.max(0, markerWidth) : ROW_MARKER_WIDTH)
+    + (Array.isArray(columns) ? columns : []).reduce((total, column) => {
+      const width = Number(column?.width);
+      return total + (Number.isFinite(width) ? Math.max(0, width) : 0);
+    }, 0);
 }
 
 export function clampRowHeight(value, fallback = DEFAULT_ROW_HEIGHT) {

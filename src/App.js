@@ -12,7 +12,7 @@ import { clampCell, containsCell, moveSelection, selectionRange } from "./select
 import { buildClearChanges } from "./clear";
 import { buildReplaceChanges, buildValueChanges, filteredRowIndexes, targetRowsForColumn } from "./batch";
 import { buildFillChanges, fillPreviewMap } from "./fill";
-import { clampColumnWidth, clampRowHeight, DEFAULT_ROW_HEIGHT, layoutNeedsMigration, migrateRowHeights, normalizeLayout } from "./layout";
+import { clampColumnWidth, clampRowHeight, DEFAULT_ROW_HEIGHT, gridWidthOf, layoutNeedsMigration, migrateRowHeights, normalizeLayout, ROW_MARKER_WIDTH } from "./layout";
 import { buildNativeFilter, defaultFilterForControl, filterMapToList, filterOptionsForControl, mergeQueryParams } from "./query";
 import { AttachmentDisplay, EntityTags, LocationDisplay, NumberDisplay } from "./FieldDisplays";
 import { diagnostics } from "./diagnostics";
@@ -454,10 +454,11 @@ export default function App() {
     return {
       id: control.controlId,
       title,
-      width: columnWidths[control.controlId] || clampColumnWidth(Math.max(120, numberWidth, Math.min(260, title.length * 15 + 48))),
+      width: columnWidths[control.controlId] || clampColumnWidth(Math.max(numberWidth, Math.min(260, title.length * 15 + 48))),
       grow: 0
     };
   }), [adapters, controls, columnWidths]);
+  const tableWidth = useMemo(() => gridWidthOf(columns, ROW_MARKER_WIDTH), [columns]);
 
   const rowHeightFor = useCallback((row) => rowHeights[row?.key] || defaultRowHeight, [defaultRowHeight, rowHeights]);
 
@@ -1437,10 +1438,14 @@ export default function App() {
               setVirtualScrollTop(el.scrollTop);
               if (el.scrollTop + el.clientHeight >= el.scrollHeight - 500) loadNext();
             }}>
-              <table className="native-grid">
+              <table className="native-grid" style={{ width: tableWidth, minWidth: "100%" }}>
+                <colgroup>
+                  <col className="row-marker" style={{ width: ROW_MARKER_WIDTH }} />
+                  {columns.map((column) => <col key={column.id} style={{ width: column.width }} />)}
+                </colgroup>
                 <thead><tr>
-                  <th className="row-marker"><input type="checkbox" aria-label="选择全部记录" checked={rows.length > 0 && selectedRows.length === rows.length} onChange={(event) => setSelectedRows(event.target.checked ? rows.map((row) => row.key) : [])} /></th>
-                  {columns.map((column) => <th key={column.id} className={queryState.sortId === column.id || queryState.filterMap[column.id] ? "header-active" : ""} style={{ width: column.width, minWidth: column.width }}>
+                  <th className="row-marker" style={{ width: ROW_MARKER_WIDTH, minWidth: ROW_MARKER_WIDTH }}><input type="checkbox" aria-label="选择全部记录" checked={rows.length > 0 && selectedRows.length === rows.length} onChange={(event) => setSelectedRows(event.target.checked ? rows.map((row) => row.key) : [])} /></th>
+                  {columns.map((column) => <th key={column.id} className={queryState.sortId === column.id || queryState.filterMap[column.id] ? "header-active" : ""} style={{ width: column.width, minWidth: 0 }}>
                     <span className="header-title">{column.title}</span>
                     {queryState.sortId === column.id && <span className="sort-indicator">{queryState.isAsc ? "↑" : "↓"}</span>}
                     {queryState.filterMap[column.id] && <span className="filter-indicator" title="已设置筛选">●</span>}
@@ -1539,7 +1544,7 @@ export default function App() {
                                   canOpen={!previewRow && row.state !== "deleted"}
                                   onOpen={(relation) => openRelationRecord(adapter, relation)}
                                 />
-                              : display || (adapter.nativeEditor
+                              : display ? <span className="cell-text">{display}</span> : (adapter.nativeEditor
                                 ? <span className="cell-placeholder">{row.rowId ? "双击在 HAP 中编辑" : "先保存记录后编辑"}</span>
                                 : (!disabled && ["select", "multiSelect", "member", "department", "orgRole", "relation", "location"].includes(adapter.kind) ? <span className="cell-placeholder">请选择</span> : ""))}
                           </div>}

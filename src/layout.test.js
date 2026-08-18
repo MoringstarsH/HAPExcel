@@ -1,12 +1,19 @@
 import { describe, expect, it } from "vitest";
-import { clampColumnWidth, clampRowHeight, layoutNeedsMigration, layoutToAdvancedSetting, migrateRowHeights, normalizeLayout } from "./layout";
+import { clampColumnWidth, clampRowHeight, gridWidthOf, layoutNeedsMigration, layoutToAdvancedSetting, migrateRowHeights, normalizeLayout } from "./layout";
 
 describe("layout helpers", () => {
   it("clamps column widths and row heights", () => {
-    expect(clampColumnWidth(20)).toBe(100);
+    expect(clampColumnWidth(20)).toBe(48);
+    expect(clampColumnWidth(48)).toBe(48);
     expect(clampColumnWidth(9999)).toBe(640);
     expect(clampRowHeight(10)).toBe(28);
     expect(clampRowHeight(9999)).toBe(240);
+  });
+
+  it("calculates table width from explicit columns instead of their content", () => {
+    expect(gridWidthOf([{ width: 48 }, { width: 120 }, { width: 640 }])).toBe(856);
+    expect(gridWidthOf([{ width: 48 }, { width: "120" }], 40)).toBe(208);
+    expect(gridWidthOf([{ width: "long title" }, { width: 48 }])).toBe(96);
   });
 
   it("keeps only fields and records present in the current view", () => {
