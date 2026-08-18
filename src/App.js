@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
-import { config } from "mdye";
+import { config, env } from "mdye";
 import { createFieldAdapter, getControls, safeJson } from "./adapters";
 import { buildPasteChanges, createClipboardPayload, GRID_CLIPBOARD_TYPE, readClipboardMatrix } from "./clipboard";
+import { hiddenErrorFieldNames, resolveVisibleControls } from "./columns";
 import { applyCommitResult, commitRows, validateRows } from "./commit";
 import { clearDrafts, loadDrafts, saveDrafts } from "./drafts";
 import { createGateway, rowIdOf } from "./gateway";
@@ -71,9 +72,11 @@ function ChoicePopover({ picker, adapter, value, onApply, onClose }) {
       <div className="choice-options">
         {adapter.options.map((option) => {
           const checked = keys.includes(option.key);
+          const presentation = adapter.optionTag(option.key);
           return <button type="button" className={`choice-option ${checked ? "selected" : ""}`} key={option.key} onClick={() => choose(option.key)}>
             <span className="choice-check">{checked ? "✓" : ""}</span>
-            <span>{option.value || option.name || option.key}</span>
+            <span className={`choice-option-color ${presentation.colored ? "" : "choice-option-color-neutral"}`} style={presentation.color ? { "--option-color": presentation.color } : undefined} />
+            <span>{presentation.label}</span>
           </button>;
         })}
       </div>
@@ -104,9 +107,28 @@ function RelationDisplay({ links, fallback, canOpen, onOpen }) {
   </span>;
 }
 
+function OptionTags({ tags }) {
+  if (!tags.length) return null;
+  return <span className="option-tags">
+    {tags.map((tag, index) => <span
+      className={`option-tag ${tag.colored ? "" : "option-tag-neutral"}`}
+      key={`${tag.key}-${index}`}
+      style={tag.color ? { "--option-color": tag.color } : undefined}
+      title={tag.label}
+    >{tag.label}</span>)}
+  </span>;
+}
+
 export default function App() {
   const runtimeConfig = config || {};
-  const controls = useMemo(() => getControls(runtimeConfig), [runtimeConfig]);
+  const allControls = useMemo(() => getControls(runtimeConfig), [runtimeConfig]);
+  const columnConfig = useMemo(() => resolveVisibleControls({
+    controls: allControls,
+    view: runtimeConfig.view,
+    showFields: env?.showFields
+  }), [allControls, runtimeConfig.view]);
+  const controls = columnConfig.controls;
+  const allAdapters = useMemo(() => allControls.map(createFieldAdapter), [allControls]);
   const adapters = useMemo(() => controls.map(createFieldAdapter), [controls]);
   const gateway = useMemo(() => createGateway(runtimeConfig), [runtimeConfig.appId, runtimeConfig.worksheetId, runtimeConfig.viewId]);
   const gridRef = useRef(null);
@@ -167,7 +189,7 @@ export default function App() {
     if (!hydrated) return;
     const pending = [];
     rows.forEach((row, rowIndex) => {
-      adapters.forEach((adapter) => {
+      allAdapters.forEach((adapter) => {
         if (adapter.kind !== "relation") return;
         const fieldId = adapter.control.controlId;
         const items = adapter.relationLinks(row.values[fieldId]);
@@ -204,7 +226,7 @@ export default function App() {
       }), { rebaseHistory: true });
     });
     return () => { cancelled = true; };
-  }, [adapters, gateway, hydrated, rows]);
+  }, [allAdapters, gateway, hydrated, rows]);
 
   const columns = useMemo(() => controls.map((control) => {
     const title = `${control.controlName || control.controlId}${control.required ? " *" : ""}`;
@@ -239,9 +261,9 @@ export default function App() {
         gateway.loadTotal(filters)
       ]);
       if (request !== requestRef.current) return;
-      const serverRows = records.map((record) => createServerRow(record, controls));
-      const restored = loadDrafts(runtimeConfig, controls);
-      setRows(mergeRestoredDrafts(serverRows, restored.rows, controls), { clearHistory: true });
+      const serverRows = records.map((record) => createServerRow(record, allControls));
+      const restored = loadDrafts(runtimeConfig, allControls);
+      setRows(mergeRestoredDrafts(serverRows, restored.rows, allControls), { clearHistory: true });
       setTotal(count ?? (records.length < PAGE_SIZE ? records.length : null));
       setHasMore(count == null ? records.length === PAGE_SIZE : records.length < count);
       loadedServerCountRef.current = records.length;
@@ -250,13 +272,14 @@ export default function App() {
       setHydrated(true);
       if (restored.incompatible) setMessage("字段结构已变化，旧草稿未套用；放弃草稿后可清理");
       else if (restored.rows.length) setMessage(`已恢复 ${restored.rows.length} 条草稿${restored.migrated ? "（已升级）" : ""}`);
+      else if (columnConfig.source === "fallback-invalid") setMessage(`显示字段配置已失效，已回退为业务字段（${columnConfig.invalidIds.length} 个字段不可用）`);
       else setMessage(`已加载 ${records.length} 条记录`);
     } catch (error) {
       if (request !== requestRef.current) return;
       setLoadState("failed");
       setMessage(`加载失败：${error?.message || "请检查视图权限或网络"}`);
     }
-  }, [controls, gateway, runtimeConfig]);
+  }, [allControls, columnConfig.invalidIds.length, columnConfig.source, gateway, runtimeConfig]);
 
   const loadNext = useCallback(async () => {
     if (!hasMore || loadingMoreRef.current || loadState !== "ready") return;
@@ -266,7 +289,7 @@ export default function App() {
       const records = await gateway.loadPage({ pageIndex: nextPage, pageSize: PAGE_SIZE, filters: filtersRef.current });
       const loadedIds = new Set(rows.filter((row) => row.rowId).map((row) => row.rowId));
       const overlapsLoadedRow = records.some((record) => loadedIds.has(rowIdOf(record)));
-      setRows((current) => mergeServerPage(current, records, controls), { clearHistory: overlapsLoadedRow });
+      setRows((current) => mergeServerPage(current, records, allControls), { clearHistory: overlapsLoadedRow });
       pageRef.current = nextPage;
       loadedServerCountRef.current += records.length;
       const nextLoaded = loadedServerCountRef.current;
@@ -277,7 +300,7 @@ export default function App() {
     } finally {
       loadingMoreRef.current = false;
     }
-  }, [controls, gateway, hasMore, loadState, rows, total]);
+  }, [allControls, gateway, hasMore, loadState, rows, total]);
 
   useEffect(() => { loadInitial(); }, [loadInitial]);
   useEffect(() => gateway.on("filters-update", (filters) => {
@@ -291,15 +314,15 @@ export default function App() {
   useEffect(() => {
     if (!hydrated) return undefined;
     clearTimeout(saveTimer.current);
-    saveTimer.current = setTimeout(() => saveDrafts(runtimeConfig, controls, rows), 300);
+    saveTimer.current = setTimeout(() => saveDrafts(runtimeConfig, allControls, rows), 300);
     return () => clearTimeout(saveTimer.current);
-  }, [controls, hydrated, rows, runtimeConfig]);
+  }, [allControls, hydrated, rows, runtimeConfig]);
 
   const applyChanges = useCallback((changes, label = "编辑单元格") => {
     setRows((current) => {
       const next = [...current];
       changes.forEach(({ rowIndex, columnIndex, input, directValue, parsedValue, parsedError }) => {
-        while (next.length <= rowIndex && next.filter((row) => !row.rowId).length < MAX_NEW_ROWS) next.push(createDraftRow(controls));
+        while (next.length <= rowIndex && next.filter((row) => !row.rowId).length < MAX_NEW_ROWS) next.push(createDraftRow(allControls));
         const row = next[rowIndex];
         const adapter = adapters[columnIndex];
         if (!row || !adapter || row.state === "deleted") return;
@@ -310,7 +333,7 @@ export default function App() {
       });
       return next;
     }, { record: true, label });
-  }, [adapters, controls, setRows]);
+  }, [adapters, allControls, setRows]);
 
   const selectCell = useCallback((cell, extend = false) => {
     setEditingCell(null);
@@ -459,7 +482,7 @@ export default function App() {
   }, [handleGridPointerMove]);
 
   function addRow() {
-    const draft = createDraftRow(controls);
+    const draft = createDraftRow(allControls);
     const rowIndex = rows.length;
     setRows((current) => [...current, draft], { record: true, label: "新增记录" });
     const firstWritable = Math.max(0, adapters.findIndex((adapter) => adapter.writable));
@@ -487,10 +510,13 @@ export default function App() {
 
   async function save() {
     if (!hasDrafts || loadState === "saving") return;
-    const errors = validateRows(rows, adapters);
+    const errors = validateRows(rows, allAdapters);
     if (errors.size) {
       setRows((current) => current.map((row) => errors.has(row.key) ? { ...row, cellErrors: errors.get(row.key), state: "error", saveError: "请修正字段错误" } : row), { rebaseHistory: true });
-      setMessage(`有 ${errors.size} 行校验失败，请先修正红色单元格`);
+      const hiddenFields = hiddenErrorFieldNames(errors, allControls, controls);
+      setMessage(hiddenFields.length
+        ? `有 ${errors.size} 行校验失败；隐藏字段“${hiddenFields.join("、")}”需在插件设置中重新显示后修正`
+        : `有 ${errors.size} 行校验失败，请先修正红色单元格`);
       return;
     }
     const summary = [pending.added && `新增 ${pending.added}`, pending.modified && `修改 ${pending.modified}`, pending.deleted && `删除 ${pending.deleted}`].filter(Boolean).join("、");
@@ -498,7 +524,7 @@ export default function App() {
     setLoadState("saving");
     setMessage("正在保存草稿…");
     setSaveProgress({ completed: 0, total: pending.added + pending.modified + pending.deleted });
-    const result = await commitRows(rows, adapters, gateway, (progress) => {
+    const result = await commitRows(rows, allAdapters, gateway, (progress) => {
       setSaveProgress(progress);
       setMessage(progress.phase === "delete" ? "正在删除记录…" : `正在保存 ${progress.completed}/${progress.total}…`);
     });
@@ -594,6 +620,7 @@ export default function App() {
                     ].filter(Boolean) : [];
                     const editing = sameCell(editingCell, cell);
                     const display = adapter.kind === "checkbox" ? (raw ? "✓" : "") : adapter.display(raw);
+                    const optionTags = ["select", "multiSelect"].includes(adapter.kind) ? adapter.optionTags(raw) : [];
                     const relationItems = adapter.relationLinks(raw);
                     return <td
                       key={fieldId}
@@ -624,7 +651,9 @@ export default function App() {
                             }}
                           />
                         : <div className={`cell-display kind-${adapter.kind}`}>
-                            {adapter.kind === "relation" && relationItems.length
+                            {optionTags.length
+                              ? <OptionTags tags={optionTags} />
+                              : adapter.kind === "relation" && relationItems.length
                               ? <RelationDisplay
                                   links={relationItems}
                                   fallback={display}

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
-import { createFieldAdapter, getFieldKind, relationLinks } from "./adapters";
+import { createFieldAdapter, getFieldKind, optionPresentation, relationLinks } from "./adapters";
 
-const options = [{ key: "a", value: "待处理" }, { key: "b", value: "已完成" }];
+const options = [{ key: "a", value: "待处理", color: "#34c759" }, { key: "b", value: "已完成", color: "#f04438" }];
 
 describe("field adapters", () => {
   it("supports both select type 9 and dropdown type 11", () => {
@@ -14,6 +14,25 @@ describe("field adapters", () => {
     expect(single.parseEditor("待处理").value).toEqual(["a"]);
     expect(multi.parseEditor("待处理，已完成,待处理").value).toEqual(["a", "b"]);
     expect(single.parseEditor("不存在").error).toContain("未找到");
+  });
+  it("builds colored tags for single and multi-select values", () => {
+    const single = createFieldAdapter({ type: 9, options });
+    const multi = createFieldAdapter({ type: 10, options });
+    expect(single.optionTags('["a"]')).toEqual([
+      expect.objectContaining({ key: "a", label: "待处理", color: "#34c759", colored: true })
+    ]);
+    expect(multi.optionTags(["a", "b"]).map((tag) => tag.label)).toEqual(["待处理", "已完成"]);
+  });
+  it("uses stable fallback colors and neutral unknown/disabled tags", () => {
+    expect(optionPresentation({ type: 9, options: [{ key: "a", value: "待处理" }] }, "a")).toEqual(
+      expect.objectContaining({ color: expect.any(String), colored: true })
+    );
+    expect(optionPresentation({ type: 9, options }, "missing")).toEqual(
+      expect.objectContaining({ label: "missing", color: null, colored: false })
+    );
+    expect(optionPresentation({ type: 9, colorful: false, options }, "a")).toEqual(
+      expect.objectContaining({ label: "待处理", color: null, colored: false })
+    );
   });
   it("uses clear semantics for checkboxes and numbers", () => {
     expect(createFieldAdapter({ type: 36 }).parseEditor("是").value).toBe(true);

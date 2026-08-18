@@ -1,4 +1,5 @@
 const READ_ONLY_TYPES = new Set([14, 19, 21, 22, 23, 24, 25, 27, 28, 30, 31, 32, 33, 34, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 47, 48]);
+const DEFAULT_OPTION_COLORS = ["#3370ff", "#7f66ff", "#00b8d9", "#34c759", "#ffb020", "#f04438", "#f759ab", "#8f959e"];
 
 export function safeJson(value, fallback = value) {
   if (typeof value !== "string") return value;
@@ -28,9 +29,47 @@ export function getFieldKind(control = {}, rawValue) {
 
 function optionsOf(control) { return Array.isArray(control.options) ? control.options : []; }
 
+function optionLabel(option) { return String(option?.value ?? option?.name ?? option?.key ?? ""); }
+
+function optionColorEnabled(control) {
+  return ![false, 0, "0", "false"].includes(control?.colorful);
+}
+
+function colorValueOf(option) {
+  const raw = option?.color ?? option?.colorValue ?? option?.colorIndex;
+  if (raw && typeof raw === "object") return raw.hex ?? raw.value ?? raw.color ?? raw.index;
+  return raw;
+}
+
+function normalizeOptionColor(raw, index = 0) {
+  if (typeof raw === "number" && Number.isFinite(raw)) return DEFAULT_OPTION_COLORS[Math.abs(raw) % DEFAULT_OPTION_COLORS.length];
+  if (typeof raw === "string") {
+    const value = raw.trim();
+    if (/^#(?:[\da-f]{3,4}|[\da-f]{6}|[\da-f]{8})$/i.test(value)) return value;
+    if (/^(?:rgb|rgba|hsl|hsla)\([^()]+\)$/i.test(value)) return value;
+    if (/^[a-z]+$/i.test(value)) return value;
+    if (/^\d+$/.test(value)) return DEFAULT_OPTION_COLORS[Number(value) % DEFAULT_OPTION_COLORS.length];
+  }
+  return DEFAULT_OPTION_COLORS[index % DEFAULT_OPTION_COLORS.length];
+}
+
+export function optionPresentation(control, key) {
+  const options = optionsOf(control);
+  const optionIndex = options.findIndex((item) => String(item?.key) === String(key));
+  const option = optionIndex >= 0 ? options[optionIndex] : null;
+  const known = Boolean(option);
+  const colored = known && optionColorEnabled(control);
+  return {
+    key: String(key ?? ""),
+    label: known ? optionLabel(option) : String(key ?? ""),
+    color: colored ? normalizeOptionColor(colorValueOf(option), optionIndex) : null,
+    colored
+  };
+}
+
 function optionByText(control, text) {
   const normalized = String(text ?? "").trim();
-  const matches = optionsOf(control).filter((option) => String(option.value ?? option.name ?? "").trim() === normalized);
+  const matches = optionsOf(control).filter((option) => optionLabel(option).trim() === normalized);
   if (matches.length > 1) return { error: "存在同名选项，请打开选项菜单选择" };
   if (!matches.length && normalized) return { error: `未找到选项“${normalized}”` };
   return matches[0] || null;
@@ -68,7 +107,7 @@ export function displayValue(control, raw) {
   const kind = getFieldKind(control, raw);
   if (kind === "checkbox") return raw === true || raw === 1 || raw === "1" || raw === "true" || raw === "是" || raw === "✓" ? "✓" : "";
   if (kind === "select" || kind === "multiSelect") {
-    return keysFrom(raw).map((key) => optionsOf(control).find((item) => item.key === key)?.value ?? key).join(", ");
+    return keysFrom(raw).map((key) => optionPresentation(control, key).label).join(", ");
   }
   if (kind === "relation") {
     if (typeof raw === "number" || (typeof raw === "string" && /^\d+$/.test(raw))) return `已关联 ${raw} 条`;
@@ -100,6 +139,10 @@ export function valueLabels(control, raw) {
     return items.length ? itemLabels(items, ["sid", "rowid"]) : displayValue(control, raw) ? [displayValue(control, raw)] : [];
   }
   return [];
+}
+
+function optionTags(control, raw) {
+  return keysFrom(raw).map((key) => optionPresentation(control, key));
 }
 
 function parseInput(input, control) {
@@ -160,6 +203,8 @@ export function createFieldAdapter(control = {}) {
     kind,
     writable: isWritableControl(control),
     options: optionsOf(control),
+    optionTag: (key) => optionPresentation(control, key),
+    optionTags: (raw) => optionTags(control, raw),
     display: (raw) => displayValue(control, raw),
     labels: (raw) => valueLabels(control, raw),
     relationLinks: (raw) => kind === "relation" ? relationLinks(raw) : [],
