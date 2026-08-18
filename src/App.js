@@ -3,7 +3,7 @@ import { config, env } from "mdye";
 import { createFieldAdapter, getControls, safeJson } from "./adapters";
 import { buildPasteChanges, createClipboardPayload, GRID_CLIPBOARD_TYPE, readClipboardMatrix } from "./clipboard";
 import { hiddenErrorFieldNames, resolveVisibleControls } from "./columns";
-import { applyCommitResult, commitRows, commitSummary, validateRows } from "./commit";
+import { applyCommitResult, commitRows, commitSummary, normalizeOptionalFieldErrors, validateRows } from "./commit";
 import { clearDrafts, loadDrafts, saveDrafts } from "./drafts";
 import { createGateway, rowIdOf } from "./gateway";
 import { canUndo, createHistoryState, historyReducer } from "./history";
@@ -497,7 +497,7 @@ export default function App() {
     diagnostics.info("performance.renderWindow", { loadedRows: rows.length, logicalRows: renderRows.length, renderedRows: visibleRenderRows.length, memoryBytes: globalThis.performance?.memory?.usedJSHeapSize });
   }, [renderRows.length, rows.length, visibleRenderRows.length]);
 
-  const loadInitial = useCallback(async (filters) => {
+  const loadInitial = useCallback(async (filters, options = {}) => {
     const startedAt = globalThis.performance?.now?.() || Date.now();
     const request = ++requestRef.current;
     filtersRef.current = filters || {};
@@ -514,7 +514,9 @@ export default function App() {
       const currentRows = rowsRef.current;
       const serverRows = records.map((record) => createServerRow(record, allControls));
       const restored = hydratedRef.current ? { rows: [], incompatible: false, migrated: false } : loadDrafts(runtimeConfig, allControls);
-      const nextRows = hydratedRef.current
+      const nextRows = options.forceServer
+        ? serverRows
+        : hydratedRef.current
         ? mergeQueriedRows(currentRows, records, allControls)
         : mergeRestoredDrafts(serverRows, restored.rows, allControls);
       const conflictCount = nextRows.filter((row) => row.conflict).length;
@@ -1104,7 +1106,8 @@ export default function App() {
     if (!online) { setMessage("当前离线，草稿未提交"); return; }
     const unknownRows = rows.filter((row) => row.state === "unknown");
     if (unknownRows.length && !window.confirm(`有 ${unknownRows.length} 条新增记录的上次提交结果未知。请先在 HAP 中核对；确认仍要重试吗？重复提交可能产生重复记录。`)) return;
-    const errors = validateRows(rows, allAdapters);
+    const preparedRows = normalizeOptionalFieldErrors(rows, allAdapters);
+    const errors = validateRows(preparedRows, allAdapters);
     if (errors.size) {
       setRows((current) => current.map((row) => errors.has(row.key) ? { ...row, cellErrors: errors.get(row.key), state: "error", saveError: "请修正字段错误" } : row), { rebaseHistory: true });
       const hiddenFields = hiddenErrorFieldNames(errors, allControls, controls);
@@ -1118,7 +1121,7 @@ export default function App() {
     commitLockRef.current = true;
     const batchId = globalThis.crypto?.randomUUID?.() || `commit-${Date.now()}`;
     activeCommitRef.current = batchId;
-    const submittingRows = rows.map((row) => hasPendingChange(row) ? { ...row, commitBatchId: batchId } : row);
+    const submittingRows = preparedRows.map((row) => hasPendingChange(row) ? { ...row, commitBatchId: batchId } : row);
     rowsRef.current = submittingRows;
     saveDrafts(runtimeConfig, allControls, submittingRows);
     setLoadState("saving");
@@ -1165,9 +1168,11 @@ export default function App() {
 
   function discard() {
     if (hasDrafts && !window.confirm("确认放弃全部未保存的新增、修改和删除草稿？")) return;
+    clearTimeout(saveTimer.current);
+    saveTimer.current = null;
     clearDrafts(runtimeConfig);
     setRefreshPending(false);
-    loadInitial(filtersRef.current);
+    loadInitial(filtersRef.current, { forceServer: true });
   }
 
   function manualRefresh() {

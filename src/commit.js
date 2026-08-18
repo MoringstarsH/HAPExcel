@@ -29,13 +29,35 @@ export function validateRows(rows, adapters) {
     adapters.forEach((adapter) => {
       if (!adapter.writable) return;
       if (row.rowId && !row.dirtyFields.includes(adapter.control.controlId)) return;
-      const error = adapter.validate(row.values[adapter.control.controlId], Boolean(adapter.control.required));
-      if (error) cellErrors[adapter.control.controlId] = error;
-      else delete cellErrors[adapter.control.controlId];
+      const fieldId = adapter.control.controlId;
+      const existingError = cellErrors[fieldId];
+      const error = adapter.validate(row.values[fieldId], Boolean(adapter.control.required));
+      if (error) cellErrors[fieldId] = error;
+      else if (!existingError) delete cellErrors[fieldId];
     });
     if (Object.keys(cellErrors).length) errors.set(row.key, cellErrors);
   });
   return errors;
+}
+
+export function normalizeOptionalFieldErrors(rows, adapters) {
+  return rows.map((row) => {
+    if (row.state === "deleted") return row;
+    let values = row.values;
+    let cellErrors = row.cellErrors;
+    adapters.forEach((adapter) => {
+      const fieldId = adapter.control.controlId;
+      if (!adapter.writable || adapter.control.required) return;
+      if (row.rowId && !row.dirtyFields.includes(fieldId)) return;
+      const error = cellErrors?.[fieldId] || adapter.validate(values?.[fieldId], false);
+      if (!error) return;
+      values = values === row.values ? { ...values } : values;
+      cellErrors = cellErrors === row.cellErrors ? { ...cellErrors } : cellErrors;
+      values[fieldId] = "";
+      delete cellErrors[fieldId];
+    });
+    return values === row.values && cellErrors === row.cellErrors ? row : { ...row, values, cellErrors };
+  });
 }
 
 async function runWorkers(items, worker, concurrency = 3) {
@@ -55,10 +77,11 @@ async function runWorkers(items, worker, concurrency = 3) {
 }
 
 export async function commitRows(rows, adapters, gateway, onProgress = () => {}) {
-  const validationErrors = validateRows(rows, adapters);
+  const preparedRows = normalizeOptionalFieldErrors(rows, adapters);
+  const validationErrors = validateRows(preparedRows, adapters);
   if (validationErrors.size) return { validationErrors, writes: [], deletion: null, deleteSkipped: false };
 
-  const writeRows = rows.filter((row) => row.state !== "deleted" && (
+  const writeRows = preparedRows.filter((row) => row.state !== "deleted" && (
     row.dirtyFields.length || (!row.rowId && Object.values(row.values).some(isMeaningful))
   ));
   let completed = 0;
@@ -72,7 +95,7 @@ export async function commitRows(rows, adapters, gateway, onProgress = () => {})
   });
 
   const failedWrites = writes.filter((result) => !result.ok);
-  const deleteRows = rows.filter((row) => row.state === "deleted" && row.rowId);
+  const deleteRows = preparedRows.filter((row) => row.state === "deleted" && row.rowId);
   let deletion = null;
   let deleteSkipped = false;
   if (deleteRows.length) {

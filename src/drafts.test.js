@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { draftKey, loadDrafts, saveDrafts } from "./drafts";
+import { clearDrafts, draftKey, loadDrafts, saveDrafts } from "./drafts";
 
 function memoryStorage() {
   const values = new Map();
@@ -100,5 +100,13 @@ describe("draft persistence", () => {
       rows: [{ key: "readonly-only", rowId: null, state: "new", values: { formula: "" }, dirtyFields: ["formula"], cellErrors: { formula: "此字段为只读字段" } }]
     }));
     expect(loadDrafts(config, readonlyControls, storage).rows).toEqual([]);
+  });
+
+  it("clears current and legacy draft keys when discarding", () => {
+    const storage = memoryStorage();
+    [1, 2, 3].forEach((version) => storage.setItem(draftKey(config, version), "draft"));
+
+    expect(clearDrafts(config, storage)).toEqual({ ok: true });
+    expect([1, 2, 3].map((version) => storage.getItem(draftKey(config, version)))).toEqual([null, null, null]);
   });
 });

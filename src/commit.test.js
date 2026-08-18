@@ -1,9 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { createFieldAdapter } from "./adapters";
-import { applyCommitResult, commitRows, commitSummary } from "./commit";
+import { applyCommitResult, commitRows, commitSummary, normalizeOptionalFieldErrors, validateRows } from "./commit";
 
 const text = createFieldAdapter({ controlId: "name", controlName: "名称", type: 2, required: true });
 const relation = createFieldAdapter({ controlId: "customer", controlName: "客户", type: 29 });
+const optionalNumber = createFieldAdapter({ controlId: "quantity", type: 6 });
+const optionalEmail = createFieldAdapter({ controlId: "email", type: 5 });
+const optionalDate = createFieldAdapter({ controlId: "date", type: 15 });
 
 function newRow(values, dirtyFields) {
   return { key: "new-1", rowId: null, state: "new", values, dirtyFields, cellErrors: {}, serverSnapshot: {}, saveError: "" };
@@ -14,6 +17,27 @@ function serverRow(state = "modified") {
 }
 
 describe("commit pipeline", () => {
+  it("normalizes invalid optional values to empty without blocking save", async () => {
+    const gateway = { add: vi.fn(async () => ({ data: { rowid: "created" } })), update: vi.fn(), deleteRows: vi.fn() };
+    const row = { ...newRow({ quantity: "not-a-number", email: "invalid", date: "2026-02-30" }, ["quantity", "email", "date"]), cellErrors: { quantity: "请输入有效数字", email: "请输入有效邮箱地址", date: "日期或时间无效" } };
+    expect(validateRows(normalizeOptionalFieldErrors([row], [optionalNumber, optionalEmail, optionalDate]), [optionalNumber, optionalEmail, optionalDate]).size).toBe(0);
+    const result = await commitRows([row], [optionalNumber, optionalEmail, optionalDate], gateway);
+    expect(gateway.add.mock.calls[0][0]).toEqual(expect.arrayContaining([
+      expect.objectContaining({ controlId: "quantity", value: "" }),
+      expect.objectContaining({ controlId: "email", value: "" }),
+      expect.objectContaining({ controlId: "date", value: "" })
+    ]));
+    expect(result.writes[0].ok).toBe(true);
+  });
+
+  it("still blocks invalid or empty required values", () => {
+    const requiredNumber = createFieldAdapter({ controlId: "quantity", type: 6, required: true });
+    const invalid = { ...newRow({ quantity: "bad" }, ["quantity"]), cellErrors: { quantity: "请输入有效数字" } };
+    const empty = { ...newRow({ quantity: "" }, ["quantity"]), cellErrors: { quantity: "此字段为必填字段" } };
+    expect(validateRows([invalid], [requiredNumber]).get(invalid.key).quantity).toContain("数字");
+    expect(validateRows([empty], [requiredNumber]).get(empty.key).quantity).toContain("必填");
+  });
+
   it("adds a blank-row draft whose first edit is a relation selection", async () => {
     const gateway = {
       add: vi.fn(async () => ({ data: { rowid: "created" } })),
@@ -53,7 +77,7 @@ describe("commit pipeline", () => {
   });
 
   it("blocks malformed structured fields before calling the gateway", async () => {
-    const invalidSelect = createFieldAdapter({ controlId: "materialType", type: 9 });
+    const invalidSelect = createFieldAdapter({ controlId: "materialType", type: 9, required: true });
     const row = newRow({ materialType: [{ label: "缺少 key" }] }, ["materialType"]);
     const gateway = { add: vi.fn(), update: vi.fn(), deleteRows: vi.fn() };
     const result = await commitRows([row], [invalidSelect], gateway);
