@@ -3,19 +3,25 @@ import { config, env } from "mdye";
 import { createFieldAdapter, getControls, safeJson } from "./adapters";
 import { buildPasteChanges, createClipboardPayload, GRID_CLIPBOARD_TYPE, readClipboardMatrix } from "./clipboard";
 import { hiddenErrorFieldNames, resolveVisibleControls } from "./columns";
-import { applyCommitResult, commitRows, validateRows } from "./commit";
+import { applyCommitResult, commitRows, commitSummary, validateRows } from "./commit";
 import { clearDrafts, loadDrafts, saveDrafts } from "./drafts";
 import { createGateway, rowIdOf } from "./gateway";
 import { canUndo, createHistoryState, historyReducer } from "./history";
-import { createDraftRow, createServerRow, editRow, hasPendingChange, markDeleted, mergeQueriedRows, mergeRestoredDrafts, mergeServerPage, restoreDeleted } from "./rows";
+import { createDraftRow, createServerRow, editRow, hasPendingChange, markDeleted, mergeQueriedRows, mergeRestoredDrafts, mergeServerPage, rebaseRowFromServer, restoreDeleted } from "./rows";
 import { clampCell, containsCell, moveSelection, selectionRange } from "./selection";
 import { buildFillChanges, fillPreviewMap } from "./fill";
 import { clampColumnWidth, clampRowHeight, DEFAULT_ROW_HEIGHT, layoutNeedsMigration, migrateRowHeights, normalizeLayout } from "./layout";
 import { buildNativeFilter, defaultFilterForControl, filterMapToList, filterOptionsForControl, mergeQueryParams } from "./query";
+import { AttachmentDisplay, EntityTags, LocationDisplay, NumberDisplay } from "./FieldDisplays";
+import { diagnostics } from "./diagnostics";
+import { scrollVelocity } from "./autoScroll";
+import { virtualWindow as calculateVirtualWindow } from "./virtualization";
 
 const PAGE_SIZE = 100;
 const MAX_CELLS = 5000;
 const MAX_NEW_ROWS = 200;
+const VIRTUALIZE_AFTER = 300;
+const VIRTUAL_BUFFER = 30;
 
 function selectedKeys(raw) {
   const parsed = safeJson(raw, raw);
@@ -24,6 +30,19 @@ function selectedKeys(raw) {
 }
 
 function sameCell(a, b) { return a?.column === b?.column && a?.row === b?.row; }
+
+function saveSummaryText(summary) {
+  const parts = [];
+  for (const operation of ["add", "update", "delete"]) {
+    const label = operation === "add" ? "新增" : operation === "update" ? "修改" : "删除";
+    const item = summary[operation];
+    if (item.success) parts.push(`${label}成功 ${item.success}`);
+    if (item.failed) parts.push(`${label}失败 ${item.failed}`);
+    if (item.unknown) parts.push(`${label}待核对 ${item.unknown}`);
+    if (item.skipped) parts.push(`${label}暂缓 ${item.skipped}`);
+  }
+  return parts.join("，") || "没有可提交操作";
+}
 
 function filterValueText(value) {
   if (Array.isArray(value)) return value.join(", ");
@@ -139,7 +158,7 @@ function CellInputEditor({ adapter, raw, onCommit, onCancel, onMove }) {
     onCommit(value.replace("T", " "));
     if (movement) onMove(movement);
   };
-  return <input
+  const input = <input
     ref={inputRef}
     className="cell-editor"
     type={inputType}
@@ -155,6 +174,12 @@ function CellInputEditor({ adapter, raw, onCommit, onCancel, onMove }) {
       else if (event.key === "Tab") { event.preventDefault(); commit({ column: event.shiftKey ? -1 : 1, row: 0 }); }
     }}
   />;
+  const number = adapter.kind === "number" ? adapter.numberPresentation(raw) : null;
+  return number ? <div className={`number-editor-shell ${number.percentage ? "number-percentage" : ""}`}>
+    {number.prefix && <span className="number-prefix">{number.prefix}</span>}
+    {input}
+    {number.suffix && <span className="number-suffix">{number.suffix}</span>}
+  </div> : input;
 }
 
 function ChoicePopover({ picker, adapter, value, onApply, onClose }) {
@@ -223,6 +248,30 @@ function OptionTags({ tags }) {
   </span>;
 }
 
+function MemberAvatar({ member }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => setFailed(false), [member.avatar]);
+  if (member.avatar && !failed) {
+    return <img className="member-avatar" src={member.avatar} alt="" aria-hidden="true" onError={() => setFailed(true)} />;
+  }
+  return <span className="member-avatar member-avatar-fallback" style={{ "--member-color": member.color }} aria-hidden="true">{member.initials}</span>;
+}
+
+function MemberTags({ tags }) {
+  if (!tags.length) return null;
+  return <span className="member-tags">
+    {tags.map((member, index) => <span
+      className="member-tag"
+      key={`${member.accountId || member.fullname}-${index}`}
+      title={member.fullname}
+      aria-label={member.fullname}
+    >
+      <MemberAvatar member={member} />
+      <span className="member-name">{member.fullname}</span>
+    </span>)}
+  </span>;
+}
+
 export default function App() {
   const runtimeConfig = config || {};
   const allControls = useMemo(() => getControls(runtimeConfig), [runtimeConfig]);
@@ -234,7 +283,7 @@ export default function App() {
   const controls = columnConfig.controls;
   const allAdapters = useMemo(() => allControls.map(createFieldAdapter), [allControls]);
   const adapters = useMemo(() => controls.map(createFieldAdapter), [controls]);
-  const gateway = useMemo(() => createGateway(runtimeConfig), [runtimeConfig.appId, runtimeConfig.worksheetId, runtimeConfig.viewId]);
+  const gateway = useMemo(() => createGateway(runtimeConfig), [runtimeConfig.appId, runtimeConfig.projectId, runtimeConfig.worksheetId, runtimeConfig.viewId]);
   const gridRef = useRef(null);
   const pageRef = useRef(1);
   const requestRef = useRef(0);
@@ -256,6 +305,9 @@ export default function App() {
   const latestLayoutRef = useRef({ columnWidths: {}, defaultRowHeight: DEFAULT_ROW_HEIGHT, rowHeights: {} });
   const layoutDirtyRef = useRef(false);
   const layoutRevisionRef = useRef(0);
+  const commitLockRef = useRef(false);
+  const activeCommitRef = useRef("");
+  const autoScrollRef = useRef({ frame: 0, x: 0, y: 0, clientX: 0, clientY: 0 });
   const [rowHistory, dispatchRows] = useReducer(historyReducer, [], createHistoryState);
   const rows = rowHistory.value;
   const setRows = useCallback((update, options = {}) => {
@@ -289,6 +341,10 @@ export default function App() {
   const [queryState, setQueryState] = useState({ sortId: "", isAsc: true, filterMap: {} });
   const [saveProgress, setSaveProgress] = useState(null);
   const [hydrated, setHydrated] = useState(false);
+  const [online, setOnline] = useState(() => globalThis.navigator?.onLine !== false);
+  const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
+  const [diagnosticEntries, setDiagnosticEntries] = useState(() => diagnostics.list());
+  const [virtualScrollTop, setVirtualScrollTop] = useState(0);
   const hydratingRelationsRef = useRef(new Set());
 
   rowsRef.current = rows;
@@ -300,6 +356,15 @@ export default function App() {
     if (rowHistory.conflict) setMessage("撤销已取消：数据已被外部刷新");
     else if (rowHistory.lastUndoLabel) setMessage(`已撤销：${rowHistory.lastUndoLabel}`);
   }, [rowHistory.conflict, rowHistory.lastUndoLabel]);
+
+  useEffect(() => diagnostics.subscribe(setDiagnosticEntries), []);
+  useEffect(() => {
+    const observer = typeof PerformanceObserver === "function" ? new PerformanceObserver((list) => {
+      list.getEntries().forEach((entry) => diagnostics.info("performance.longtask", { durationMs: Math.round(entry.duration), startMs: Math.round(entry.startTime) }));
+    }) : null;
+    try { observer?.observe({ type: "longtask", buffered: true }); } catch (_) { /* browser may not support longtask */ }
+    return () => observer?.disconnect();
+  }, []);
 
   useEffect(() => {
     setSelectedRows((current) => {
@@ -358,15 +423,18 @@ export default function App() {
     return () => { cancelled = true; };
   }, [allAdapters, gateway, hydrated, rows]);
 
-  const columns = useMemo(() => controls.map((control) => {
+  const columns = useMemo(() => controls.map((control, index) => {
     const title = `${control.controlName || control.controlId}${control.required ? " *" : ""}`;
+    const adapter = adapters[index];
+    const number = adapter?.numberPresentation?.(0);
+    const numberWidth = number ? 150 + Math.min(48, ((number.prefix?.length || 0) + (number.suffix?.length || 0)) * 12) : 0;
     return {
       id: control.controlId,
       title,
-      width: columnWidths[control.controlId] || clampColumnWidth(Math.max(120, Math.min(260, title.length * 15 + 48))),
+      width: columnWidths[control.controlId] || clampColumnWidth(Math.max(120, numberWidth, Math.min(260, title.length * 15 + 48))),
       grow: 0
     };
-  }), [controls, columnWidths]);
+  }), [adapters, controls, columnWidths]);
 
   const rowHeightFor = useCallback((row) => rowHeights[row?.key] || defaultRowHeight, [defaultRowHeight, rowHeights]);
 
@@ -420,8 +488,17 @@ export default function App() {
     }
     return [...rows, ...previews];
   }, [allControls, renderedRowCount, rows]);
+  const virtualWindow = useMemo(() => {
+    return calculateVirtualWindow({ rowCount: renderRows.length, scrollTop: virtualScrollTop, viewportHeight: gridRef.current?.clientHeight || 600, rowHeight: defaultRowHeight, threshold: VIRTUALIZE_AFTER, buffer: VIRTUAL_BUFFER });
+  }, [defaultRowHeight, renderRows.length, virtualScrollTop]);
+  const visibleRenderRows = renderRows.slice(virtualWindow.start, virtualWindow.end);
+
+  useEffect(() => {
+    diagnostics.info("performance.renderWindow", { loadedRows: rows.length, logicalRows: renderRows.length, renderedRows: visibleRenderRows.length, memoryBytes: globalThis.performance?.memory?.usedJSHeapSize });
+  }, [renderRows.length, rows.length, visibleRenderRows.length]);
 
   const loadInitial = useCallback(async (filters) => {
+    const startedAt = globalThis.performance?.now?.() || Date.now();
     const request = ++requestRef.current;
     filtersRef.current = filters || {};
     setLoadState("loading");
@@ -440,6 +517,7 @@ export default function App() {
       const nextRows = hydratedRef.current
         ? mergeQueriedRows(currentRows, records, allControls)
         : mergeRestoredDrafts(serverRows, restored.rows, allControls);
+      const conflictCount = nextRows.filter((row) => row.conflict).length;
       setRows(nextRows, { clearHistory: true });
       if (!hydratedRef.current) {
         layoutMigrationPendingRef.current = layoutNeedsMigration(runtimeConfig.view);
@@ -455,7 +533,10 @@ export default function App() {
       pageRef.current = 1;
       setLoadState("ready");
       setHydrated(true);
-      if (restored.incompatible) setMessage("字段结构已变化，旧草稿未套用；放弃草稿后可清理");
+      diagnostics.info("performance.initialLoad", { durationMs: Math.round((globalThis.performance?.now?.() || Date.now()) - startedAt), recordCount: records.length, withinBudget: (globalThis.performance?.now?.() || Date.now()) - startedAt <= 2000 });
+      setRefreshPending(false);
+      if (conflictCount) setMessage(`检测到 ${conflictCount} 条服务端记录已变化，本地草稿未被覆盖；请核对后再保存`);
+      else if (restored.incompatible) setMessage("字段结构已变化，旧草稿未套用；放弃草稿后可清理");
       else if (restored.rows.length) setMessage(`已恢复 ${restored.rows.length} 条草稿${restored.migrated ? "（已升级）" : ""}`);
       else if (currentRows.some(hasPendingChange)) setMessage(`已刷新 ${records.length} 条记录，保留 ${currentRows.filter(hasPendingChange).length} 条本地草稿`);
       else if (columnConfig.source === "fallback-invalid") setMessage(`显示字段配置已失效，已回退为业务字段（${columnConfig.invalidIds.length} 个字段不可用）`);
@@ -463,6 +544,7 @@ export default function App() {
     } catch (error) {
       if (request !== requestRef.current) return;
       setLoadState("failed");
+      diagnostics.error("load.initial", error, { durationMs: Math.round((globalThis.performance?.now?.() || Date.now()) - startedAt) });
       setMessage(`加载失败：${error?.message || "请检查视图权限或网络"}`);
     }
   }, [allControls, columnConfig.invalidIds.length, columnConfig.source, controls, gateway, runtimeConfig, setRows]);
@@ -476,6 +558,28 @@ export default function App() {
     externalFiltersRef.current = externalFilters || {};
     return loadInitial(composeQuery(externalFiltersRef.current, nextQuery));
   }, [composeQuery, loadInitial]);
+
+  useEffect(() => {
+    const handleOffline = () => { setOnline(false); setMessage("网络已断开，草稿已保留；恢复联网后再保存"); diagnostics.info("network.offline"); };
+    const handleOnline = () => { setOnline(true); setMessage("网络已恢复，正在刷新并核对服务端数据…"); diagnostics.info("network.online"); reloadWithQuery(externalFiltersRef.current, queryRef.current); };
+    window.addEventListener("offline", handleOffline);
+    window.addEventListener("online", handleOnline);
+    return () => { window.removeEventListener("offline", handleOffline); window.removeEventListener("online", handleOnline); };
+  }, [reloadWithQuery]);
+
+  useEffect(() => {
+    const flush = () => { if (hydratedRef.current) saveDrafts(runtimeConfig, allControls, rowsRef.current); };
+    const beforeUnload = (event) => {
+      if (!rowsRef.current.some(hasPendingChange)) return;
+      flush();
+      event.preventDefault();
+      event.returnValue = "";
+    };
+    const visibility = () => { if (document.visibilityState === "hidden") flush(); };
+    window.addEventListener("beforeunload", beforeUnload);
+    document.addEventListener("visibilitychange", visibility);
+    return () => { flush(); window.removeEventListener("beforeunload", beforeUnload); document.removeEventListener("visibilitychange", visibility); };
+  }, [allControls, runtimeConfig]);
 
   const loadNext = useCallback(async () => {
     if (!hasMore || loadingMoreRef.current || loadState !== "ready") return;
@@ -503,7 +607,22 @@ export default function App() {
     reloadWithQuery(filters || {}, queryRef.current);
   }), [gateway, reloadWithQuery]);
   useEffect(() => gateway.on("new-record", () => {
-    reloadWithQuery(externalFiltersRef.current, queryRef.current);
+    if (rowsRef.current.some(hasPendingChange)) {
+      setRefreshPending(true);
+      setMessage("服务端新增了记录；当前草稿未覆盖，保存或放弃后可刷新");
+    } else reloadWithQuery(externalFiltersRef.current, queryRef.current);
+  }), [gateway, reloadWithQuery]);
+  useEffect(() => gateway.on("update-record", () => {
+    if (rowsRef.current.some(hasPendingChange)) {
+      setRefreshPending(true);
+      setMessage("服务端记录已更新；当前草稿未覆盖，保存或放弃后可刷新");
+    } else reloadWithQuery(externalFiltersRef.current, queryRef.current);
+  }), [gateway, reloadWithQuery]);
+  useEffect(() => gateway.on("delete-record", () => {
+    if (rowsRef.current.some(hasPendingChange)) {
+      setRefreshPending(true);
+      setMessage("服务端记录已删除；当前草稿未覆盖，保存或放弃后可刷新");
+    } else reloadWithQuery(externalFiltersRef.current, queryRef.current);
   }), [gateway, reloadWithQuery]);
   useEffect(() => {
     if (!hydrated) return undefined;
@@ -626,16 +745,23 @@ export default function App() {
     if (sourceSelection) setCellSelection(sourceSelection);
   }, [cellSelection, fillHandleEnabled, fillSourceRange]);
 
+  const stopAutoScroll = useCallback(() => {
+    if (autoScrollRef.current.frame) cancelAnimationFrame(autoScrollRef.current.frame);
+    autoScrollRef.current = { frame: 0, x: 0, y: 0, clientX: 0, clientY: 0 };
+  }, []);
+
   const cancelFillDrag = useCallback(() => {
     if (!fillDragRef.current) return;
+    stopAutoScroll();
     fillDragRef.current = null;
     setFillDrag(null);
     setMessage("已取消拖拽填充");
-  }, []);
+  }, [stopAutoScroll]);
 
   const finishFillDrag = useCallback(() => {
     const drag = fillDragRef.current;
     if (!drag) return;
+    stopAutoScroll();
     fillDragRef.current = null;
     setFillDrag(null);
     const result = buildFillChanges({
@@ -662,22 +788,35 @@ export default function App() {
     setMessage(result.errors.length
       ? `已填充 ${result.changes.length} 个单元格，跳过 ${result.errors.length} 个不可填充单元格`
       : `已填充 ${result.changes.length} 个单元格`);
-  }, [adapters, applyChanges, rows]);
+  }, [adapters, applyChanges, rows, stopAutoScroll]);
 
   const selectCell = useCallback((cell, extend = false) => {
+    const startedAt = globalThis.performance?.now?.() || Date.now();
     setEditingCell(null);
     setCellSelection((current) => ({ anchor: extend && current?.anchor ? current.anchor : cell, focus: cell }));
     gridRef.current?.focus?.({ preventScroll: true });
+    requestAnimationFrame(() => {
+      const durationMs = Math.round((globalThis.performance?.now?.() || Date.now()) - startedAt);
+      if (durationMs > 50) diagnostics.info("performance.selectCell", { durationMs, withinBudget: durationMs <= 100 });
+    });
   }, []);
 
   const moveCellSelection = useCallback((column, row, extend = false) => {
     setCellSelection((current) => {
       const next = moveSelection(current, column, row, adapters.length, Math.max(1, rows.length), extend);
-      setTimeout(() => document.querySelector(`[data-grid-row="${next.focus.row}"][data-grid-column="${next.focus.column}"]`)?.scrollIntoView?.({ block: "nearest", inline: "nearest" }), 0);
+      setTimeout(() => {
+        const selector = `[data-grid-row="${next.focus.row}"][data-grid-column="${next.focus.column}"]`;
+        const target = document.querySelector(selector);
+        if (target) target.scrollIntoView?.({ block: "nearest", inline: "nearest" });
+        else if (gridRef.current) {
+          gridRef.current.scrollTop = next.focus.row * defaultRowHeight;
+          requestAnimationFrame(() => document.querySelector(selector)?.scrollIntoView?.({ block: "nearest", inline: "nearest" }));
+        }
+      }, 0);
       return next;
     });
     setEditingCell(null);
-  }, [adapters.length, rows.length]);
+  }, [adapters.length, defaultRowHeight, rows.length]);
 
   const copyCells = useCallback((event) => {
     if (!cellSelection || editingCell) return;
@@ -696,43 +835,88 @@ export default function App() {
     const matrix = readClipboardMatrix(event.clipboardData.getData("text/plain"), event.clipboardData.getData(GRID_CLIPBOARD_TYPE));
     const result = buildPasteChanges({ matrix, selection: cellSelection, adapters, rowCount: rows.length, maxCells: MAX_CELLS, maxNewRows: MAX_NEW_ROWS });
     if (result.fatal) { setMessage(result.fatal); return; }
-    applyChanges(result.changes, "批量粘贴");
+    if (result.changes.length) applyChanges(result.changes, "批量粘贴");
     if (result.target) setCellSelection({ anchor: { column: result.target.left, row: result.target.top }, focus: { column: result.target.right, row: result.target.bottom } });
-    setMessage(result.errors.length ? `已粘贴 ${result.changes.length - result.errors.length} 格，${result.errors.length} 格类型不匹配或只读` : `已粘贴 ${result.changes.length} 个单元格`);
+    const successCount = result.changes.length - result.errors.length;
+    const parts = [];
+    if (successCount) parts.push(`已粘贴 ${successCount} 格`);
+    else if (result.skipped.length && !result.errors.length) parts.push("未修改数据");
+    if (result.skipped.length) parts.push(`忽略 ${result.skipped.length} 个只读单元格`);
+    if (result.errors.length) parts.push(`${result.errors.length} 格类型不匹配或格式错误`);
+    setMessage(parts.join("，") || "没有可粘贴的单元格");
   }, [adapters, applyChanges, cellSelection, editingCell, rows.length]);
+
+  const openNativeEditor = useCallback(async (row, adapter) => {
+    if (!row?.rowId) {
+      setMessage(`${adapter.control.controlName || "此字段"}需先保存记录后再编辑`);
+      return;
+    }
+    if (rowsRef.current.some(hasPendingChange)) {
+      setRefreshPending(true);
+      setMessage("请先保存或放弃本地草稿，再打开 HAP 原生记录窗口");
+      return;
+    }
+    try {
+      const result = await gateway.openCurrentRecord(row.rowId);
+      if (result?.action === "delete") {
+        setRows((current) => current.filter((item) => item.rowId !== row.rowId), { clearHistory: true });
+        setMessage("记录已在 HAP 原生窗口中删除");
+        return;
+      }
+      const detail = await gateway.loadRowDetail(row.rowId);
+      setRows((current) => current.map((item) => item.rowId === row.rowId ? rebaseRowFromServer(item, detail, allControls) : item), { clearHistory: true });
+      setMessage(`${adapter.control.controlName || "字段"}已从 HAP 刷新`);
+    } catch (error) {
+      setMessage(`无法打开 HAP 原生记录窗口：${error?.message || "记录不存在或没有权限"}`);
+    }
+  }, [allControls, gateway, setRows]);
 
   const activateCell = useCallback(async ([columnIndex, rowIndex], anchor) => {
     const row = rows[rowIndex];
     const adapter = adapters[columnIndex];
-    if (!row || !adapter || !adapter.writable || row.state === "deleted") return;
+    if (!row || !adapter || (!adapter.writable && !adapter.nativeEditor) || row.state === "deleted") return;
     const fieldId = adapter.control.controlId;
+    if (adapter.nativeEditor) {
+      await openNativeEditor(row, adapter);
+      return;
+    }
     if (adapter.kind === "select" || adapter.kind === "multiSelect") {
       const bounds = anchor?.getBoundingClientRect?.();
       setPicker({ columnIndex, rowIndex, left: Math.max(8, bounds?.x || 16), top: Math.max(8, Math.min(window.innerHeight - 300, (bounds?.y || 40) + (bounds?.height || 36))) });
       return;
     }
-    if (adapter.kind !== "member" && adapter.kind !== "relation") return;
+    if (!["member", "department", "orgRole", "relation", "location"].includes(adapter.kind)) return;
     try {
-      const selected = adapter.kind === "member"
-        ? await gateway.selectUsers(adapter.control)
+      const selected = adapter.kind === "member" ? await gateway.selectUsers(adapter.control)
+        : adapter.kind === "department" ? await gateway.selectDepartments(adapter.control)
+        : adapter.kind === "orgRole" ? await gateway.selectOrgRoles(adapter.control)
+        : adapter.kind === "location" ? await gateway.selectLocation(adapter.control, adapter.locationValue(row.values[fieldId]))
         : await gateway.selectRelation(adapter.control);
       if (!selected || (Array.isArray(selected) && !selected.length)) return;
+      if (adapter.kind === "location") {
+        applyChanges([{ rowIndex, columnIndex, directValue: selected }], "选择定位");
+        return;
+      }
       const list = Array.isArray(selected) ? selected : [selected];
       const unique = Number(adapter.control.enumDefault) === 1 || Number(adapter.control.subType) === 1;
       const value = adapter.kind === "member"
         ? (unique ? list.slice(0, 1) : list).map((item) => ({ ...item, accountId: item.accountId || item.id || item }))
+        : adapter.kind === "department"
+        ? (unique ? list.slice(0, 1) : list).map((item) => ({ ...item, departmentId: item.departmentId || item.id || item }))
+        : adapter.kind === "orgRole"
+        ? (unique ? list.slice(0, 1) : list).map((item) => ({ ...item, organizeId: item.organizeId || item.id || item }))
         : (unique ? list.slice(0, 1) : list).map((item) => ({ ...item, sid: item.sid || item.rowid || item.id || item }));
-      applyChanges([{ rowIndex, columnIndex, directValue: value }], adapter.kind === "member" ? "选择成员" : "选择关联记录");
+      applyChanges([{ rowIndex, columnIndex, directValue: value }], `选择${adapter.control.controlName || "字段"}`);
     } catch (error) {
       setMessage(`选择失败：${error?.message || "操作已取消"}`);
     }
-  }, [adapters, applyChanges, gateway, rows]);
+  }, [adapters, applyChanges, gateway, openNativeEditor, rows]);
 
   const beginEdit = useCallback((cell, anchor) => {
     const row = rows[cell.row];
     const adapter = adapters[cell.column];
-    if (!row || !adapter || !adapter.writable || row.state === "deleted") return;
-    if (["select", "multiSelect", "member", "relation"].includes(adapter.kind)) {
+    if (!row || !adapter || (!adapter.writable && !adapter.nativeEditor) || row.state === "deleted") return;
+    if (["select", "multiSelect", "member", "department", "orgRole", "relation", "location"].includes(adapter.kind) || adapter.nativeEditor) {
       activateCell([cell.column, cell.row], anchor);
       return;
     }
@@ -773,8 +957,16 @@ export default function App() {
       event.preventDefault();
       const cell = cellSelection.focus;
       beginEdit(cell, document.querySelector(`[data-grid-row="${cell.row}"][data-grid-column="${cell.column}"]`));
+    } else if (event.key === "Delete" || event.key === "Backspace") {
+      const cell = cellSelection.focus;
+      const adapter = adapters[cell.column];
+      const row = rows[cell.row];
+      if (adapter?.writable && row && row.state !== "deleted" && ["select", "multiSelect", "member", "department", "orgRole", "relation", "location"].includes(adapter.kind)) {
+        event.preventDefault();
+        applyChanges([{ rowIndex: cell.row, columnIndex: cell.column, directValue: adapter.kind === "location" ? "" : [] }], `清空${adapter.control.controlName || "字段"}`);
+      }
     }
-  }, [beginEdit, cancelFillDrag, cellSelection, editingCell, fillDrag, moveCellSelection]);
+  }, [adapters, applyChanges, beginEdit, cancelFillDrag, cellSelection, editingCell, fillDrag, moveCellSelection, rows]);
 
   const handleUndoKeyDown = useCallback((event) => {
     const key = String(event.key || "").toLowerCase();
@@ -842,16 +1034,34 @@ export default function App() {
     const container = gridRef.current;
     if (!container) return;
     const bounds = container.getBoundingClientRect();
-    const edge = 36;
-    if (event.clientY < bounds.top + edge) container.scrollTop -= 24;
-    else if (event.clientY > bounds.bottom - edge) container.scrollTop += 24;
-    if (event.clientX < bounds.left + edge) container.scrollLeft -= 24;
-    else if (event.clientX > bounds.right - edge) container.scrollLeft += 24;
-  }, []);
+    const velocity = scrollVelocity(event.clientX, event.clientY, bounds);
+    autoScrollRef.current.x = velocity.x;
+    autoScrollRef.current.y = velocity.y;
+    autoScrollRef.current.clientX = event.clientX;
+    autoScrollRef.current.clientY = event.clientY;
+    if (!velocity.x && !velocity.y) { stopAutoScroll(); return; }
+    if (autoScrollRef.current.frame) return;
+    const tick = () => {
+      const state = autoScrollRef.current;
+      const target = gridRef.current;
+      if (!target || (!draggingRef.current && !fillDragRef.current) || (!state.x && !state.y)) { stopAutoScroll(); return; }
+      target.scrollLeft += state.x;
+      target.scrollTop += state.y;
+      if (fillDragRef.current) {
+        const targetRow = rowIndexAtPoint({ clientX: state.clientX, clientY: state.clientY }, target);
+        if (targetRow !== null && Number.isFinite(targetRow) && targetRow !== fillDragRef.current.targetRow) {
+          fillDragRef.current.targetRow = targetRow;
+          setFillDrag((current) => current ? { ...current, targetRow } : current);
+        }
+      }
+      state.frame = requestAnimationFrame(tick);
+    };
+    autoScrollRef.current.frame = requestAnimationFrame(tick);
+  }, [stopAutoScroll]);
 
   useEffect(() => {
-    const stopDragging = () => { draggingRef.current = false; finishResize(); finishFillDrag(); };
-    const cancelDragging = () => { draggingRef.current = false; finishResize(); cancelFillDrag(); };
+    const stopDragging = () => { draggingRef.current = false; stopAutoScroll(); finishResize(); finishFillDrag(); };
+    const cancelDragging = () => { draggingRef.current = false; stopAutoScroll(); finishResize(); cancelFillDrag(); };
     window.addEventListener("pointermove", handleGridPointerMove);
     window.addEventListener("pointerup", stopDragging);
     window.addEventListener("pointercancel", cancelDragging);
@@ -860,7 +1070,7 @@ export default function App() {
       window.removeEventListener("pointerup", stopDragging);
       window.removeEventListener("pointercancel", cancelDragging);
     };
-  }, [cancelFillDrag, finishFillDrag, finishResize, handleGridPointerMove]);
+  }, [cancelFillDrag, finishFillDrag, finishResize, handleGridPointerMove, stopAutoScroll]);
 
   function addRow() {
     const draft = createDraftRow(allControls);
@@ -890,7 +1100,10 @@ export default function App() {
   }
 
   async function save() {
-    if (!hasDrafts || loadState === "saving") return;
+    if (!hasDrafts || loadState === "saving" || commitLockRef.current) return;
+    if (!online) { setMessage("当前离线，草稿未提交"); return; }
+    const unknownRows = rows.filter((row) => row.state === "unknown");
+    if (unknownRows.length && !window.confirm(`有 ${unknownRows.length} 条新增记录的上次提交结果未知。请先在 HAP 中核对；确认仍要重试吗？重复提交可能产生重复记录。`)) return;
     const errors = validateRows(rows, allAdapters);
     if (errors.size) {
       setRows((current) => current.map((row) => errors.has(row.key) ? { ...row, cellErrors: errors.get(row.key), state: "error", saveError: "请修正字段错误" } : row), { rebaseHistory: true });
@@ -902,30 +1115,51 @@ export default function App() {
     }
     const summary = [pending.added && `新增 ${pending.added}`, pending.modified && `修改 ${pending.modified}`, pending.deleted && `删除 ${pending.deleted}`].filter(Boolean).join("、");
     if (!window.confirm(`确认提交：${summary}？\n删除操作提交后不可由本表格撤销。`)) return;
+    commitLockRef.current = true;
+    const batchId = globalThis.crypto?.randomUUID?.() || `commit-${Date.now()}`;
+    activeCommitRef.current = batchId;
+    const submittingRows = rows.map((row) => hasPendingChange(row) ? { ...row, commitBatchId: batchId } : row);
+    rowsRef.current = submittingRows;
+    saveDrafts(runtimeConfig, allControls, submittingRows);
     setLoadState("saving");
     setMessage("正在保存草稿…");
     setSaveProgress({ completed: 0, total: pending.added + pending.modified + pending.deleted });
-    const result = await commitRows(rows, allAdapters, gateway, (progress) => {
-      setSaveProgress(progress);
-      setMessage(progress.phase === "delete" ? "正在删除记录…" : `正在保存 ${progress.completed}/${progress.total}…`);
-    });
-    const next = applyCommitResult(rows, result);
-    setRowHeights((current) => migrateRowHeights(current, result));
-    const failedWrites = result.writes.filter((entry) => !entry.ok).length;
-    const failed = failedWrites + (result.deletion && !result.deletion.ok ? result.deletion.rowIds.length : 0);
-    const remoteMutation = result.writes.some((entry) => entry.ok) || Boolean(result.deletion?.ok);
-    setRows(next, remoteMutation ? { clearHistory: true } : { rebaseHistory: true });
-    setSaveProgress(null);
-    if (!failed && !result.deleteSkipped) {
-      clearDrafts(runtimeConfig);
-      setMessage("保存成功，正在刷新…");
+    try {
+      const result = await commitRows(submittingRows, allAdapters, gateway, (progress) => {
+        setSaveProgress(progress);
+        setMessage(progress.phase === "delete" ? "正在删除记录…" : `正在保存 ${progress.completed}/${progress.total}…`);
+      });
+      let next = applyCommitResult(submittingRows, result);
+      const refreshed = await Promise.all(result.writes.filter((entry) => entry.ok).map(async (entry) => {
+        const committed = next.find((row) => row.key === entry.item.key);
+        if (!committed?.rowId) return null;
+        try { return { key: committed.key, record: await gateway.loadRowDetail(committed.rowId) }; }
+        catch (_) { return null; }
+      }));
+      const refreshedByKey = new Map(refreshed.filter(Boolean).map((entry) => [entry.key, entry.record]));
+      next = next.map((row) => refreshedByKey.has(row.key) ? rebaseRowFromServer(row, refreshedByKey.get(row.key), allControls) : row);
+      const resultSummary = commitSummary(result);
+      const resultText = saveSummaryText(resultSummary);
+      diagnostics.info("commit.complete", { batchId, summary: resultSummary });
+      setRowHeights((current) => migrateRowHeights(current, result));
+      const failedWrites = result.writes.filter((entry) => !entry.ok).length;
+      const failed = failedWrites + (result.deletion && !result.deletion.ok ? result.deletion.rowIds.length : 0);
+      const remoteMutation = result.writes.some((entry) => entry.ok) || Boolean(result.deletion?.ok);
+      rowsRef.current = next;
+      setRows(next, remoteMutation ? { clearHistory: true } : { rebaseHistory: true });
+      saveDrafts(runtimeConfig, allControls, next);
+      if (!failed && !result.deleteSkipped) clearDrafts(runtimeConfig);
+      setMessage(`${failed || result.deleteSkipped ? "部分保存完成" : "保存完成"}：${resultText}，正在复核服务端…`);
       await loadInitial(filtersRef.current);
-      setMessage(`保存成功：${summary}`);
-    } else {
+      setMessage(`${failed || result.deleteSkipped ? "部分保存完成" : "保存成功"}：${resultText}`);
+    } catch (error) {
+      diagnostics.error("commit.pipeline", error, { batchId });
       setLoadState("ready");
-      setMessage(result.deleteSkipped
-        ? `部分保存完成：${failedWrites} 行失败，删除已暂缓；修正后可重试`
-        : `部分保存完成：${failed} 项失败，可直接重试`);
+      setMessage(`保存流程异常：${error?.message || "请查看诊断详情"}`);
+    } finally {
+      if (activeCommitRef.current === batchId) activeCommitRef.current = "";
+      commitLockRef.current = false;
+      setSaveProgress(null);
     }
   }
 
@@ -934,6 +1168,29 @@ export default function App() {
     clearDrafts(runtimeConfig);
     setRefreshPending(false);
     loadInitial(filtersRef.current);
+  }
+
+  function manualRefresh() {
+    if (hasDrafts) {
+      setRefreshPending(true);
+      setMessage("当前存在本地草稿；保存或放弃后才能应用服务端最新数据");
+      return;
+    }
+    reloadWithQuery(externalFiltersRef.current, queryRef.current);
+  }
+
+  async function copyDiagnostics() {
+    try { await navigator.clipboard.writeText(diagnostics.export()); setMessage("诊断信息已复制"); }
+    catch (error) { diagnostics.error("diagnostics.copy", error); setMessage("复制失败，请下载诊断文件"); }
+  }
+
+  function downloadDiagnostics() {
+    const url = URL.createObjectURL(new Blob([diagnostics.export()], { type: "application/json" }));
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = `hap-table-diagnostics-${Date.now()}.json`;
+    anchor.click();
+    URL.revokeObjectURL(url);
   }
 
   const selectedAllDeleted = selectedRows.length > 0 && selectedRows.every((key) => rows.find((row) => row.key === key)?.state === "deleted");
@@ -953,16 +1210,31 @@ export default function App() {
         </button>
       </div>
       <div className="toolbar-status" title={message}>
+        {!online && <span className="network-offline">离线</span>}
         {hasDrafts && <span className="draft-count">新增 {pending.added} · 修改 {pending.modified} · 删除 {pending.deleted}{pending.errors ? ` · 错误 ${pending.errors}` : ""}</span>}
         <span className={loadState === "failed" ? "status-error" : ""}>{message}</span>
       </div>
       <div className="toolbar-actions">
+        <button type="button" className="ghost-button" onClick={() => setDiagnosticsOpen((value) => !value)}>诊断{diagnosticEntries.some((entry) => entry.level === "error") ? " !" : ""}</button>
+        <button type="button" className="ghost-button" onClick={manualRefresh} disabled={loadState === "saving"}>刷新</button>
         <button type="button" className="ghost-button" onClick={discard} disabled={!hasDrafts && !refreshPending}>放弃草稿</button>
-        <button type="button" className="save-button" onClick={save} disabled={!hasDrafts || loadState === "saving"}>
+        <button type="button" className="save-button" onClick={save} disabled={!hasDrafts || loadState === "saving" || !online}>
           {loadState === "saving" ? `保存中${saveProgress?.total ? ` ${saveProgress.completed}/${saveProgress.total}` : "…"}` : "保存"}
         </button>
       </div>
     </header>
+
+    {diagnosticsOpen && <aside className="diagnostics-panel" aria-label="诊断信息">
+      <div className="diagnostics-header"><strong>诊断信息（已脱敏）</strong><span>{diagnosticEntries.length} 条</span></div>
+      <div className="diagnostics-actions">
+        <button type="button" onClick={copyDiagnostics}>复制</button>
+        <button type="button" onClick={downloadDiagnostics}>下载 JSON</button>
+        <button type="button" onClick={() => diagnostics.clear()}>清空</button>
+      </div>
+      <ol>{diagnosticEntries.slice(-50).reverse().map((entry) => <li key={entry.id} className={`diagnostic-${entry.level}`}>
+        <time>{entry.time}</time><strong>{entry.operation}</strong><code>{entry.error?.message || entry.message || entry.code || ""}</code>
+      </li>)}</ol>
+    </aside>}
 
     {refreshPending && <div className="notice-bar">
       <span>数据或筛选条件已变化，当前草稿尚未保存。</span>
@@ -980,6 +1252,7 @@ export default function App() {
             onKeyDown={handleGridKeyDown} onCopy={copyCells} onPaste={pasteCells} onPointerMove={handleGridPointerMove}
             onScroll={(event) => {
               const el = event.currentTarget;
+              setVirtualScrollTop(el.scrollTop);
               if (el.scrollTop + el.clientHeight >= el.scrollHeight - 500) loadNext();
             }}>
               <table className="native-grid">
@@ -993,16 +1266,20 @@ export default function App() {
                     <span className={`column-resize-handle ${resizing === `column:${column.id}` ? "active" : ""}`} aria-hidden="true" onPointerDown={(event) => beginColumnResize(event, column.id)} />
                   </th>)}
                 </tr></thead>
-                <tbody>{renderRows.map((row, rowIndex) => {
+                <tbody>
+                {virtualWindow.top > 0 && <tr className="virtual-spacer" aria-hidden="true"><td colSpan={adapters.length + 1} style={{ height: virtualWindow.top }} /></tr>}
+                {visibleRenderRows.map((row, visibleIndex) => {
+                  const rowIndex = virtualWindow.start + visibleIndex;
                   const previewRow = row.state === "preview";
                   const rowHeight = rowHeightFor(row);
-                  return <tr key={row.key} data-row-key={row.key} className={`row-${row.state}`} style={{ height: rowHeight }} aria-hidden={previewRow || undefined}>
+                  return <tr key={row.key} data-row-key={row.key} className={`row-${row.state}${row.conflict ? " row-conflict" : ""}`} style={{ height: rowHeight }} aria-hidden={previewRow || undefined}>
                   <td className="row-marker" style={{ height: rowHeight }}>{!previewRow && <input type="checkbox" aria-label={`选择第 ${rowIndex + 1} 行`} checked={selectedRows.includes(row.key)} onChange={(event) => setSelectedRows((current) => event.target.checked ? [...new Set([...current, row.key])] : current.filter((item) => item !== row.key))} />}<span>{rowIndex + 1}</span>{!previewRow && <span className={`row-resize-handle ${resizing === `row:${row.key}` ? "active" : ""}`} aria-label="调整行高" title="拖拽调整行高" onPointerDown={(event) => beginRowResize(event, row)} />}</td>
                   {adapters.map((adapter, columnIndex) => {
                     const fieldId = adapter.control.controlId;
                     const previewValue = fillPreviewCells.get(`${rowIndex}:${columnIndex}`);
                     const raw = previewValue ? previewValue.value : row.values[fieldId];
                     const disabled = !adapter.writable || row.state === "deleted";
+                    const interactive = (adapter.writable || adapter.nativeEditor) && row.state !== "deleted";
                     const error = previewValue ? "" : row.cellErrors[fieldId];
                     const cell = { column: columnIndex, row: rowIndex };
                     const active = sameCell(cellSelection?.focus, cell);
@@ -1015,7 +1292,12 @@ export default function App() {
                     ].filter(Boolean) : [];
                     const editing = sameCell(editingCell, cell);
                     const display = adapter.kind === "checkbox" ? (raw ? "✓" : "") : adapter.display(raw);
+                    const number = adapter.numberPresentation(raw);
                     const optionTags = ["select", "multiSelect"].includes(adapter.kind) ? adapter.optionTags(raw) : [];
+                    const memberTags = adapter.kind === "member" ? adapter.memberTags(raw) : [];
+                    const entityTags = ["department", "appRole", "orgRole"].includes(adapter.kind) ? adapter.entityTags(raw) : [];
+                    const attachmentItems = adapter.kind === "attachment" ? adapter.attachments(raw) : [];
+                    const location = adapter.kind === "location" ? adapter.locationValue(raw) : null;
                     const relationItems = adapter.relationLinks(raw);
                     const showFillHandle = fillHandleEnabled
                       && !fillDrag
@@ -1030,7 +1312,7 @@ export default function App() {
                       role="gridcell"
                       aria-selected={selected}
                       aria-readonly={disabled}
-                      className={[error && "cell-error", selected && "cell-selected", previewValue && "cell-fill-preview", ...selectionEdges, active && "cell-active", editing && "cell-editing", disabled && "cell-disabled"].filter(Boolean).join(" ")}
+                      className={[error && "cell-error", selected && "cell-selected", previewValue && "cell-fill-preview", ...selectionEdges, active && "cell-active", editing && "cell-editing", disabled && "cell-disabled", number && "cell-number", adapter.nativeEditor && "cell-native-editor"].filter(Boolean).join(" ")}
                       title={error || (previewValue ? `预览：${display}` : display)}
                       onPointerDown={(event) => {
                         if (previewRow || event.button !== 0 || editing) return;
@@ -1038,7 +1320,7 @@ export default function App() {
                         draggingRef.current = true;
                         selectCell(cell, event.shiftKey);
                       }}
-                      onDoubleClick={(event) => { event.preventDefault(); beginEdit(cell, event.currentTarget); }}
+                      onDoubleClick={(event) => { event.preventDefault(); if (interactive) beginEdit(cell, event.currentTarget); }}
                     >
                       {editing
                         ? <CellInputEditor
@@ -1052,8 +1334,21 @@ export default function App() {
                             }}
                           />
                         : <div className={`cell-display kind-${adapter.kind}`}>
-                            {optionTags.length
+                            {number?.formattedValue
+                              ? <NumberDisplay presentation={number} />
+                              : optionTags.length
                               ? <OptionTags tags={optionTags} />
+                              : memberTags.length
+                              ? <MemberTags tags={memberTags} />
+                              : entityTags.length
+                              ? <EntityTags items={entityTags} kind={adapter.kind} />
+                              : attachmentItems.length
+                              ? <AttachmentDisplay items={attachmentItems} onPreview={(item) => {
+                                  if (!item.url) { setMessage("附件缺少可预览地址，请在 HAP 原生记录窗口中查看"); return; }
+                                  window.open(item.url, "_blank", "noopener,noreferrer");
+                                }} />
+                              : location
+                              ? <LocationDisplay value={location} />
                               : adapter.kind === "relation" && relationItems.length
                               ? <RelationDisplay
                                   links={relationItems}
@@ -1061,7 +1356,9 @@ export default function App() {
                                   canOpen={!previewRow && row.state !== "deleted"}
                                   onOpen={(relation) => openRelationRecord(adapter, relation)}
                                 />
-                              : display || (!disabled && ["select", "multiSelect", "member", "relation"].includes(adapter.kind) ? <span className="cell-placeholder">请选择</span> : "")}
+                              : display || (adapter.nativeEditor
+                                ? <span className="cell-placeholder">{row.rowId ? "双击在 HAP 中编辑" : "先保存记录后编辑"}</span>
+                                : (!disabled && ["select", "multiSelect", "member", "department", "orgRole", "relation", "location"].includes(adapter.kind) ? <span className="cell-placeholder">请选择</span> : ""))}
                           </div>}
                       {error && <small>{error}</small>}
                       {showFillHandle && <button
@@ -1075,7 +1372,9 @@ export default function App() {
                     </td>;
                   })}
                 </tr>;
-                })}</tbody>
+                })}
+                {virtualWindow.bottom > 0 && <tr className="virtual-spacer" aria-hidden="true"><td colSpan={adapters.length + 1} style={{ height: virtualWindow.bottom }} /></tr>}
+                </tbody>
               </table>
               <button type="button" className="append-row" onClick={addRow}>＋ 新增记录</button>
             </div>}

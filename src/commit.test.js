@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { createFieldAdapter } from "./adapters";
-import { applyCommitResult, commitRows } from "./commit";
+import { applyCommitResult, commitRows, commitSummary } from "./commit";
 
 const text = createFieldAdapter({ controlId: "name", controlName: "名称", type: 2, required: true });
 const relation = createFieldAdapter({ controlId: "customer", controlName: "客户", type: 29 });
@@ -26,6 +26,39 @@ describe("commit pipeline", () => {
     expect(gateway.update).not.toHaveBeenCalled();
     expect(result.writes[0].ok).toBe(true);
     expect(applyCommitResult([row], result)[0].rowId).toBe("created");
+  });
+
+  it("submits copied rows with option JSON encoded exactly once", async () => {
+    const controls = [
+      createFieldAdapter({ controlId: "date", type: 15 }),
+      createFieldAdapter({ controlId: "materialType", type: 9 }),
+      createFieldAdapter({ controlId: "name", type: 2 }),
+      createFieldAdapter({ controlId: "quantity", type: 6 }),
+      createFieldAdapter({ controlId: "unit", type: 9 }),
+      createFieldAdapter({ controlId: "amount", type: 8 })
+    ];
+    const rows = Array.from({ length: 6 }, (_, index) => ({
+      ...newRow({ date: "2026-08-19", materialType: '["stone"]', name: "螺纹钢", quantity: 800, unit: '["ton"]', amount: 498 }, ["date", "materialType", "name", "quantity", "unit", "amount"]),
+      key: `copy-${index}`
+    }));
+    const gateway = { add: vi.fn(async () => ({ data: { rowid: crypto.randomUUID() } })), update: vi.fn(), deleteRows: vi.fn() };
+    const result = await commitRows(rows, controls, gateway);
+    expect(result.writes.every((entry) => entry.ok)).toBe(true);
+    expect(gateway.add).toHaveBeenCalledTimes(6);
+    gateway.add.mock.calls.forEach(([fields]) => {
+      expect(fields.find((field) => field.controlId === "materialType")?.value).toBe('["stone"]');
+      expect(fields.find((field) => field.controlId === "unit")?.value).toBe('["ton"]');
+      expect(fields.find((field) => field.controlId === "amount")?.value).toBe(498);
+    });
+  });
+
+  it("blocks malformed structured fields before calling the gateway", async () => {
+    const invalidSelect = createFieldAdapter({ controlId: "materialType", type: 9 });
+    const row = newRow({ materialType: [{ label: "缺少 key" }] }, ["materialType"]);
+    const gateway = { add: vi.fn(), update: vi.fn(), deleteRows: vi.fn() };
+    const result = await commitRows([row], [invalidSelect], gateway);
+    expect(result.validationErrors.get(row.key)?.materialType).toContain("选项");
+    expect(gateway.add).not.toHaveBeenCalled();
   });
 
   it("keeps failed writes and skips irreversible deletion", async () => {
@@ -89,5 +122,19 @@ describe("commit pipeline", () => {
     expect(result.validationErrors.size).toBe(0);
     expect(gateway.update).toHaveBeenCalledOnce();
     expect(gateway.add).not.toHaveBeenCalled();
+  });
+
+  it("keeps an ambiguous add as unknown and never deletes in that batch", async () => {
+    const created = newRow({ name: "可能已创建", customer: [] }, ["name"]);
+    const deleted = { ...serverRow("deleted"), key: "delete-2", rowId: "delete-2", dirtyFields: [] };
+    const gateway = {
+      add: vi.fn(async () => ({ ok: false, operation: "add", outcome: "unknown", code: "NETWORK_ERROR", message: "网络中断", retryable: true })),
+      update: vi.fn(), deleteRows: vi.fn()
+    };
+    const result = await commitRows([created, deleted], [text, relation], gateway);
+    const next = applyCommitResult([created, deleted], result);
+    expect(next[0]).toMatchObject({ state: "unknown", saveError: "网络中断" });
+    expect(gateway.deleteRows).not.toHaveBeenCalled();
+    expect(commitSummary(result)).toMatchObject({ add: { unknown: 1 }, delete: { skipped: 1 } });
   });
 });

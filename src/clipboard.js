@@ -24,13 +24,14 @@ export function createClipboardPayload(selection, rows, adapters) {
       const adapter = adapters[column];
       const raw = rows[row]?.values?.[adapter?.control?.controlId];
       const display = adapter?.display(raw) || "";
+      const clipboardText = adapter?.clipboardText ? adapter.clipboardText(raw) : display;
       cellRow.push({
         sourceControlId: adapter?.control?.controlId,
         sourceKind: adapter?.kind,
         raw,
         text: display
       });
-      textRow.push(display);
+      textRow.push(clipboardText);
     }
     cells.push(cellRow);
     text.push(textRow);
@@ -48,13 +49,14 @@ export function readClipboardMatrix(plain, structured) {
   return parseTsv(plain).map((row) => row.map((text) => ({ text, external: true })));
 }
 
-function isTextTarget(adapter) { return adapter?.kind === "text"; }
-function isSpecial(kind) { return ["select", "multiSelect", "member", "relation"].includes(kind); }
+function isTextTarget(adapter) { return ["text", "formattedText"].includes(adapter?.kind); }
+function isSpecial(kind) { return ["select", "multiSelect", "member", "department", "appRole", "orgRole", "relation", "location"].includes(kind); }
 
 export function mapClipboardCell(source, adapter) {
-  if (!adapter?.writable || adapter.kind === "readonly") return { error: "此字段为只读字段" };
+  if (!adapter?.writable || adapter.kind === "readonly") return { skipped: true, reason: "readonly" };
   if (source && !source.external) {
     if (isTextTarget(adapter)) return { value: source.text ?? "" };
+    if (source.sourceKind === "number" && adapter.kind === "number") return adapter.parseClipboard(String(source.raw ?? ""));
     if (isSpecial(source.sourceKind)) {
       if (adapter.kind === source.sourceKind && adapter.control.controlId === source.sourceControlId) return { value: source.raw };
       return { error: source.sourceKind === adapter.kind ? "来源字段不同，请重新选择" : "粘贴内容与当前字段类型不匹配" };
@@ -65,7 +67,7 @@ export function mapClipboardCell(source, adapter) {
 
 export function buildPasteChanges({ matrix, selection, adapters, rowCount, maxCells = 5000, maxNewRows = 200 }) {
   const range = selectionRange(selection);
-  if (!range || !matrix?.length || !matrix[0]?.length) return { changes: [], errors: [], target: range };
+  if (!range || !matrix?.length || !matrix[0]?.length) return { changes: [], errors: [], skipped: [], target: range };
   const single = matrix.length === 1 && matrix[0].length === 1;
   const height = single ? range.height : matrix.length;
   const width = single ? range.width : Math.max(...matrix.map((row) => row.length));
@@ -74,6 +76,7 @@ export function buildPasteChanges({ matrix, selection, adapters, rowCount, maxCe
   if (Math.max(0, requiredRows - rowCount) > maxNewRows) return { fatal: `粘贴已拒绝：单次最多新增 ${maxNewRows} 行` };
   const changes = [];
   const errors = [];
+  const skipped = [];
   for (let rowOffset = 0; rowOffset < height; rowOffset += 1) {
     for (let columnOffset = 0; columnOffset < width; columnOffset += 1) {
       const columnIndex = range.left + columnOffset;
@@ -81,10 +84,14 @@ export function buildPasteChanges({ matrix, selection, adapters, rowCount, maxCe
       const source = single ? matrix[0][0] : matrix[rowOffset]?.[columnOffset];
       if (!source) continue;
       const mapped = mapClipboardCell(source, adapters[columnIndex]);
+      if (mapped.skipped) {
+        skipped.push({ rowIndex: range.top + rowOffset, columnIndex, reason: mapped.reason });
+        continue;
+      }
       const change = { rowIndex: range.top + rowOffset, columnIndex, parsedValue: mapped.value, parsedError: mapped.error };
       changes.push(change);
       if (mapped.error) errors.push(change);
     }
   }
-  return { changes, errors, target: { left: range.left, top: range.top, right: range.left + width - 1, bottom: range.top + height - 1, width, height } };
+  return { changes, errors, skipped, target: { left: range.left, top: range.top, right: range.left + width - 1, bottom: range.top + height - 1, width, height } };
 }

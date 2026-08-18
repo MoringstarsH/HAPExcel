@@ -1,9 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { createDraftRow, editRow, mergeQueriedRows, mergeRestoredDrafts, mergeServerPage } from "./rows";
+import { createDraftRow, editRow, mergeQueriedRows, mergeRestoredDrafts, mergeServerPage, rebaseRowFromServer } from "./rows";
 
 const columns = [{ controlId: "name" }];
 
 describe("row model", () => {
+  it("flags a server conflict without overwriting local values", () => {
+    const pending = { key: "r-conflict", rowId: "r-conflict", state: "modified", dirtyFields: ["name"], values: { name: "本地值" }, cellErrors: {}, serverSnapshot: { rowid: "r-conflict", name: "旧值" } };
+    const merged = mergeServerPage([pending], [{ rowid: "r-conflict", name: "服务端新值" }], columns);
+    expect(merged[0]).toMatchObject({ conflict: true, values: { name: "本地值" }, serverSnapshot: { name: "服务端新值" } });
+  });
   it("always keeps an edited blank row in new state", () => {
     const row = createDraftRow(columns);
     const edited = editRow(row, "name", "测试", null);
@@ -32,5 +37,12 @@ describe("row model", () => {
     const draft = { ...createDraftRow(columns), values: { name: "新增草稿" }, dirtyFields: ["name"] };
     const merged = mergeQueriedRows([edited, draft], [{ rowid: "2", name: "服务端结果" }], columns);
     expect(merged.map((row) => row.values.name)).toEqual(["本地修改", "新增草稿", "服务端结果"]);
+  });
+  it("refreshes calculated fields without overwriting dirty values", () => {
+    const row = editRow({ key: "1", rowId: "1", state: "clean", values: { name: "旧", formula: "2" }, dirtyFields: [], cellErrors: {}, serverSnapshot: {} }, "name", "本地", null);
+    const refreshed = rebaseRowFromServer(row, { rowid: "1", name: "服务端", formula: "3" }, [{ controlId: "name" }, { controlId: "formula" }]);
+    expect(refreshed.values).toEqual({ name: "本地", formula: "3" });
+    expect(refreshed.dirtyFields).toEqual(["name"]);
+    expect(refreshed.state).toBe("modified");
   });
 });

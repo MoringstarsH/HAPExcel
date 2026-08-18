@@ -3,7 +3,7 @@ export const MIN_COLUMN_WIDTH = 100;
 export const MAX_COLUMN_WIDTH = 640;
 export const MIN_ROW_HEIGHT = 28;
 export const MAX_ROW_HEIGHT = 240;
-export const DEFAULT_ROW_HEIGHT = 38;
+export const DEFAULT_ROW_HEIGHT = 44;
 
 function numberInRange(value, fallback, min, max) {
   const number = Number(value);

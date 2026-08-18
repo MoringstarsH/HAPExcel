@@ -1,6 +1,10 @@
 import { isMeaningful } from "./rows";
 
 function rowIdOf(row) { return row?.rowid || row?.rowId || row?.id || null; }
+function normalized(response, operation) {
+  if (response && typeof response.ok === "boolean" && response.outcome) return response;
+  return { ok: true, operation, outcome: "success", rowId: rowIdOf(response?.data || response), details: response, message: "" };
+}
 
 function fieldsFor(row, adapters) {
   return adapters
@@ -40,8 +44,10 @@ async function runWorkers(items, worker, concurrency = 3) {
   async function run() {
     while (cursor < items.length) {
       const item = items[cursor++];
-      try { results.push({ item, ok: true, response: await worker(item) }); }
-      catch (error) { results.push({ item, ok: false, error: error?.message || "保存失败" }); }
+      try {
+        const response = await worker(item);
+        results.push({ item, ...response, response });
+      } catch (error) { results.push({ item, ok: false, outcome: "failed", code: error?.code || "REQUEST_ERROR", error: error?.message || "保存失败", message: error?.message || "保存失败" }); }
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrency, Math.max(items.length, 1)) }, run));
@@ -58,7 +64,8 @@ export async function commitRows(rows, adapters, gateway, onProgress = () => {})
   let completed = 0;
   const writes = await runWorkers(writeRows, async (row) => {
     const fields = fieldsFor(row, adapters);
-    const response = row.rowId ? await gateway.update(row.rowId, fields) : await gateway.add(fields);
+    const operation = row.rowId ? "update" : "add";
+    const response = normalized(row.rowId ? await gateway.update(row.rowId, fields) : await gateway.add(fields), operation);
     completed += 1;
     onProgress({ completed, total: writeRows.length, phase: "write" });
     return response;
@@ -72,14 +79,15 @@ export async function commitRows(rows, adapters, gateway, onProgress = () => {})
     if (failedWrites.length) deleteSkipped = true;
     else {
       try {
-        deletion = { ok: true, rowIds: deleteRows.map((row) => row.rowId), response: await gateway.deleteRows(deleteRows.map((row) => row.rowId)) };
+        const response = normalized(await gateway.deleteRows(deleteRows.map((row) => row.rowId)), "delete");
+        deletion = { ...response, rowIds: deleteRows.map((row) => row.rowId), response };
       } catch (error) {
-        deletion = { ok: false, rowIds: deleteRows.map((row) => row.rowId), error: error?.message || "删除失败" };
+        deletion = { ok: false, outcome: "failed", rowIds: deleteRows.map((row) => row.rowId), error: error?.message || "删除失败", message: error?.message || "删除失败" };
       }
       onProgress({ completed: deleteRows.length, total: deleteRows.length, phase: "delete" });
     }
   }
-  return { validationErrors, writes, deletion, deleteSkipped };
+  return { validationErrors, writes, deletion, deleteSkipped, deleteRowIds: deleteRows.map((row) => row.rowId) };
 }
 
 export function applyCommitResult(rows, result) {
@@ -93,7 +101,7 @@ export function applyCommitResult(rows, result) {
   return rows.filter((row) => !deleted.has(row.rowId)).map((row) => {
     const write = writesByKey.get(row.key);
     if (write?.ok) {
-      const data = write.response?.data || write.response || {};
+      const data = write.response?.details?.data || write.response?.details || write.response?.data || write.response || {};
       return {
         ...row,
         rowId: row.rowId || rowIdOf(data),
@@ -104,8 +112,32 @@ export function applyCommitResult(rows, result) {
         saveError: ""
       };
     }
-    if (write && !write.ok) return { ...row, state: "error", saveError: write.error };
-    if (row.state === "deleted" && result.deletion && !result.deletion.ok) return { ...row, state: "deleted", saveError: result.deletion.error };
+    if (write && !write.ok) return {
+      ...row,
+      state: write.outcome === "unknown" ? "unknown" : "error",
+      saveError: write.message || write.error || "保存失败",
+      saveDetails: { operation: write.operation, code: write.code, outcome: write.outcome, retryable: write.retryable }
+    };
+    if (row.state === "deleted" && result.deletion && !result.deletion.ok) return {
+      ...row,
+      state: "deleted",
+      saveError: result.deletion.message || result.deletion.error || "删除失败",
+      saveDetails: { operation: "delete", code: result.deletion.code, outcome: result.deletion.outcome, retryable: result.deletion.retryable }
+    };
     return row;
   });
+}
+
+export function commitSummary(result) {
+  const summary = { add: { success: 0, failed: 0, unknown: 0 }, update: { success: 0, failed: 0, unknown: 0 }, delete: { success: 0, failed: 0, skipped: 0 } };
+  result.writes.forEach((entry) => {
+    const target = summary[entry.operation || (entry.item.rowId ? "update" : "add")];
+    if (entry.ok) target.success += 1;
+    else if (entry.outcome === "unknown") target.unknown += 1;
+    else target.failed += 1;
+  });
+  if (result.deleteSkipped) summary.delete.skipped = result.deleteRowIds?.length || 0;
+  else if (result.deletion?.ok) summary.delete.success = result.deletion.rowIds.length;
+  else if (result.deletion) summary.delete.failed = result.deletion.rowIds.length;
+  return summary;
 }

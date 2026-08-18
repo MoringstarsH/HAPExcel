@@ -61,6 +61,20 @@ button, input { font: inherit; }
 }
 
 .status-error { color: #d92d20; }
+.network-offline { color: #b54708; background: #fffaeb; border: 1px solid #fedf89; border-radius: 10px; padding: 1px 7px; }
+.fatal-error { margin: 24px; padding: 24px; border: 1px solid #fda29b; border-radius: 10px; background: #fff5f4; color: #7a271a; }
+.fatal-error h2 { margin-top: 0; }
+.fatal-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.danger-button { color: #b42318; }
+.diagnostics-panel { position: absolute; z-index: 30; top: 52px; right: 12px; width: min(560px, calc(100% - 24px)); max-height: 60vh; overflow: auto; padding: 12px; border: 1px solid #d0d5dd; border-radius: 8px; background: #fff; box-shadow: 0 8px 24px rgba(16,24,40,.16); }
+.diagnostics-header, .diagnostics-actions { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.diagnostics-actions { justify-content: flex-start; }
+.diagnostics-panel ol { margin: 0; padding: 0; list-style: none; }
+.diagnostics-panel li { display: grid; grid-template-columns: 150px minmax(120px, 1fr) 2fr; gap: 8px; padding: 6px 0; border-top: 1px solid #eaecf0; font-size: 12px; }
+.diagnostics-panel code { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.diagnostic-error { color: #b42318; }
+.virtual-spacer td { padding: 0 !important; border: 0 !important; pointer-events: none; }
+.native-grid tr.row-conflict td.row-marker { box-shadow: inset 3px 0 #f79009; background: #fffaeb; }
 
 button {
   min-height: 32px;
@@ -132,17 +146,17 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   border-collapse: separate;
   border-spacing: 0;
   color: #1f2329;
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .native-grid th,
 .native-grid td {
-  height: 38px;
+  height: 44px;
   box-sizing: border-box;
   padding: 0;
   overflow: hidden;
-  border-right: 1px solid #e5e6eb;
-  border-bottom: 1px solid #e5e6eb;
+  border-right: 1px solid #dfe1e6;
+  border-bottom: 1px solid #dfe1e6;
   background: #fff;
 }
 
@@ -150,11 +164,12 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   position: sticky;
   z-index: 3;
   top: 0;
-  height: 42px;
-  padding: 0 10px;
+  height: 44px;
+  padding: 0 12px;
   text-align: left;
-  background: #f7f8fa;
-  font-weight: 600;
+  color: #373c43;
+  background: #f5f6f7;
+  font-weight: 650;
   overflow: visible;
 }
 
@@ -241,7 +256,7 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   align-items: center;
   box-sizing: border-box;
   margin: 0;
-  padding: 0 10px;
+  padding: 0 12px;
   overflow: hidden;
   border: 2px solid transparent;
   border-radius: 0;
@@ -255,9 +270,57 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 }
 
 .native-grid .cell-display { cursor: cell; }
-.native-grid .cell-display.kind-number { justify-content: flex-end; text-align: right; }
+.native-grid .cell-display.kind-number,
+.native-grid td.cell-number .cell-display { justify-content: flex-end; text-align: right; }
+.number-display {
+  width: 100%;
+  min-width: 0;
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  overflow: hidden;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.number-prefix,
+.number-value,
+.number-suffix { flex: 0 0 auto; }
+.number-prefix { margin-right: 4px; color: inherit; }
+.number-value { overflow: hidden; text-overflow: ellipsis; }
+.number-suffix { margin-left: 5px; color: #646a73; font-size: 12px; }
+.number-percentage .number-suffix { margin-left: 0; color: inherit; font-size: inherit; }
+.number-editor-shell {
+  position: relative;
+  z-index: 5;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  box-sizing: border-box;
+  overflow: hidden;
+  color: #1f2329;
+  background: #fff;
+  border: 2px solid #3370ff;
+  font-variant-numeric: tabular-nums;
+}
+.number-editor-shell .cell-editor {
+  position: static;
+  z-index: auto;
+  min-width: 0;
+  flex: 1 1 auto;
+  padding: 0;
+  border: 0;
+  text-align: right;
+}
 .native-grid .cell-display.kind-select,
-.native-grid .cell-display.kind-multiSelect { padding-top: 5px; padding-bottom: 5px; }
+.native-grid .cell-display.kind-multiSelect,
+.native-grid .cell-display.kind-member,
+.native-grid .cell-display.kind-department,
+.native-grid .cell-display.kind-appRole,
+.native-grid .cell-display.kind-orgRole,
+.native-grid .cell-display.kind-attachment { padding-top: 5px; padding-bottom: 5px; }
 .native-grid .cell-display.kind-relation { padding-top: 5px; padding-bottom: 5px; }
 .option-tags {
   min-width: 0;
@@ -287,6 +350,95 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   color: #646a73;
   background: #f2f3f5;
 }
+.member-tags {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+}
+.member-tag {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  gap: 5px;
+  padding: 2px 8px 2px 4px;
+  overflow: hidden;
+  color: #1f2329;
+  background: #f2f3f5;
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.member-avatar {
+  width: 20px;
+  height: 20px;
+  flex: 0 0 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  overflow: hidden;
+  border-radius: 50%;
+  object-fit: cover;
+  color: #fff;
+  background: var(--member-color, #8f959e);
+  font-size: 10px;
+  line-height: 1;
+  font-weight: 600;
+}
+.member-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.entity-tags,
+.attachment-list {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+}
+.entity-tag {
+  min-width: 0;
+  max-width: 100%;
+  padding: 3px 8px;
+  overflow: hidden;
+  color: #1f2329;
+  background: #eef2ff;
+  border: 1px solid #d8e0ff;
+  border-radius: 999px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.entity-appRole { background: #fff5e6; border-color: #ffe0ad; }
+.entity-orgRole { background: #edf9f2; border-color: #ccebd9; }
+.attachment-chip {
+  min-width: 0;
+  max-width: 190px;
+  height: 28px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 2px 3px;
+  overflow: hidden;
+  color: #245bdb;
+  background: #f5f8ff;
+  border: 1px solid #d9e4ff;
+  border-radius: 5px;
+}
+.attachment-chip > span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.attachment-chip img,
+.attachment-icon { width: 22px; height: 22px; flex: 0 0 22px; border-radius: 3px; object-fit: cover; }
+.attachment-icon { display: inline-flex; align-items: center; justify-content: center; color: #52606d; background: #e8edf5; font-size: 11px; }
+.attachment-count { color: #8f959e; white-space: nowrap; font-size: 12px; }
+.location-display { min-width: 0; display: inline-flex; align-items: center; gap: 5px; color: #245bdb; }
+.location-display span:last-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.native-grid td.cell-native-editor { cursor: pointer; }
+.native-grid td.cell-native-editor:hover { background: #eef4ff; }
 .relation-tags {
   min-width: 0;
   display: flex;
@@ -346,10 +498,11 @@ button.relation-tag { font-size: inherit; }
 .native-grid td.cell-selection-left::after { border-left-width: 2px; border-left-color: #3370ff; }
 .native-grid td.cell-active { box-shadow: inset 0 0 0 2px #3370ff; }
 .native-grid td.cell-editing { overflow: visible; box-shadow: inset 0 0 0 2px #3370ff; }
-.native-grid td.cell-disabled { background: #f5f6f7; }
-.native-grid td.cell-disabled .cell-display { color: #737383; background: #f5f6f7; cursor: default; }
+.native-grid td.cell-disabled { background: #f7f8fa; }
+.native-grid td.cell-disabled .cell-display { color: #646a73; background: #f7f8fa; cursor: default; }
 .native-grid tr:hover td.cell-disabled,
-.native-grid tr:hover td.cell-disabled .cell-display { background: #f5f6f7; }
+.native-grid tr:hover td.cell-disabled .cell-display { background: #f7f8fa; }
+.native-grid td.cell-disabled .number-suffix { color: #8f959e; }
 .native-grid .cell-placeholder { color: #b6bac0; }
 .native-grid td.cell-error { background: #fdcaca; }
 .native-grid td.cell-error .cell-display { background: #fdcaca; }

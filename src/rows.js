@@ -45,7 +45,7 @@ export function isMeaningful(value) {
 }
 
 export function hasPendingChange(row) {
-  if (row.state === "deleted" || row.state === "modified" || row.state === "error") return true;
+  if (row.state === "deleted" || row.state === "modified" || row.state === "error" || row.state === "unknown") return true;
   if (row.state === "new") return row.dirtyFields.length > 0 || Object.values(row.values).some(isMeaningful);
   return row.dirtyFields.length > 0;
 }
@@ -85,8 +85,9 @@ export function mergeServerPage(currentRows, records, columns) {
     const record = incomingById.get(row.rowId);
     if (!record) return row;
     incomingById.delete(row.rowId);
+    const serverChanged = hasPendingChange(row) && JSON.stringify(row.serverSnapshot || {}) !== JSON.stringify(record || {});
     return hasPendingChange(row)
-      ? { ...row, serverSnapshot: { ...record } }
+      ? { ...row, serverSnapshot: { ...record }, conflict: serverChanged || row.conflict }
       : createServerRow(record, columns);
   });
   const incoming = [...incomingById.values()].map((record) => createServerRow(record, columns));
@@ -101,11 +102,17 @@ export function mergeServerPage(currentRows, records, columns) {
  */
 export function mergeQueriedRows(currentRows, records, columns) {
   const pending = currentRows.filter(hasPendingChange);
+  const incomingById = new Map(records.map((record) => [rowIdOf(record), record]));
+  const reconciledPending = pending.map((row) => {
+    const incoming = incomingById.get(row.rowId);
+    if (!incoming || !row.rowId) return row;
+    return { ...row, serverSnapshot: { ...incoming }, conflict: JSON.stringify(row.serverSnapshot || {}) !== JSON.stringify(incoming) || row.conflict };
+  });
   const pendingIds = new Set(pending.filter((row) => row.rowId).map((row) => row.rowId));
   const serverRows = records
     .map((record) => createServerRow(record, columns))
     .filter((row) => !pendingIds.has(row.rowId));
-  return [...pending, ...serverRows];
+  return [...reconciledPending, ...serverRows];
 }
 
 export function mergeRestoredDrafts(serverRows, draftRows, columns) {
@@ -129,4 +136,20 @@ export function mergeRestoredDrafts(serverRows, draftRows, columns) {
     });
   });
   return merged;
+}
+
+export function rebaseRowFromServer(row, record, columns) {
+  if (!row || !record) return row;
+  const serverValues = valuesFrom(record, columns);
+  const dirty = new Set(row.dirtyFields || []);
+  const values = { ...serverValues };
+  dirty.forEach((fieldId) => { values[fieldId] = row.values[fieldId]; });
+  return {
+    ...row,
+    rowId: row.rowId || rowIdOf(record),
+    serverSnapshot: { ...record },
+    values,
+    state: dirty.size ? (row.rowId ? "modified" : "new") : "clean",
+    saveError: ""
+  };
 }

@@ -1,5 +1,15 @@
-const READ_ONLY_TYPES = new Set([14, 19, 21, 22, 23, 24, 25, 27, 28, 30, 31, 32, 33, 34, 35, 37, 38, 39, 40, 41, 42, 43, 44, 45, 47, 48]);
+const READ_ONLY_TYPES = new Set([14, 19, 21, 22, 23, 24, 25, 28, 30, 31, 32, 33, 34, 35, 37, 38, 41, 42, 43, 44, 45]);
+const NATIVE_EDITOR_TYPES = new Set([14, 19, 23, 24, 41, 44]);
 const DEFAULT_OPTION_COLORS = ["#3370ff", "#7f66ff", "#00b8d9", "#34c759", "#ffb020", "#f04438", "#f759ab", "#8f959e"];
+const MEMBER_COLORS = ["#3370ff", "#7f66ff", "#00b8d9", "#34c759", "#ffb020", "#f04438", "#f759ab", "#8f959e"];
+const NUMERIC_PRESENTATION_TYPES = new Set([6, 8, 30, 31, 37]);
+const CURRENCY_PREFIXES = new Set(["¥", "￥", "$", "€", "£", "₩", "₽", "₹", "฿", "₫", "₺", "₴", "₦", "₱", "₪", "₭", "₲", "₡", "₵"]);
+const CURRENCY_SYMBOL_BY_CODE = {
+  CNY: "¥", RMB: "¥", USD: "$", EUR: "€", GBP: "£", JPY: "¥", KRW: "₩",
+  RUB: "₽", INR: "₹", THB: "฿", VND: "₫", TRY: "₺", UAH: "₴", NGN: "₦",
+  PHP: "₱", ILS: "₪", LAK: "₭", PYG: "₲", CRC: "₡", GHS: "₵", HKD: "HK$",
+  MOP: "MOP$", TWD: "NT$", SGD: "S$", AUD: "A$", CAD: "C$"
+};
 
 export function safeJson(value, fallback = value) {
   if (typeof value !== "string") return value;
@@ -12,16 +22,24 @@ export function isWritableControl(control = {}) {
 
 export function getFieldKind(control = {}, rawValue) {
   const type = Number(control.type);
+  if (type === 14) return "attachment";
+  if ([19, 23, 24].includes(type)) return "region";
   if (type === 9 || type === 11) return "select";
   if (type === 10) return "multiSelect";
   if (type === 26) return "member";
+  if (type === 27) return "department";
   if (type === 29) return "relation";
   if (type === 36) return "checkbox";
+  if (type === 40) return "location";
+  if (type === 41) return "richText";
+  if (type === 44) return "appRole";
   if (type === 15) return "date";
   if (type === 16) return "datetime";
   if (type === 46) return "time";
+  if (type === 48) return "orgRole";
   if (type === 6 || type === 8) return "number";
-  if ([2, 3, 4, 5, 7].includes(type)) return "text";
+  if ([3, 4, 5, 7, 39, 47].includes(type)) return "formattedText";
+  if (type === 2) return "text";
   if (typeof rawValue === "boolean") return "checkbox";
   if (typeof rawValue === "number") return "number";
   return "readonly";
@@ -102,6 +120,201 @@ function itemLabels(items, keys) {
   return items.map((item) => item.fullname || item.name || item.title || item.label || item[keys[0]] || item[keys[1]] || item).filter(Boolean).map(String);
 }
 
+export function memberItems(raw) {
+  const value = safeJson(raw, raw);
+  if (Array.isArray(value)) return value.map((item) => item && typeof item === "object" ? item : { accountId: item }).filter((item) => item && typeof item === "object");
+  if (value && typeof value === "object") return [value];
+  return [];
+}
+
+function memberColor(value) {
+  let hash = 0;
+  for (const character of String(value || "member")) hash = (hash * 31 + character.charCodeAt(0)) >>> 0;
+  return MEMBER_COLORS[hash % MEMBER_COLORS.length];
+}
+
+function memberInitials(name) {
+  const characters = Array.from(String(name || "未命名成员").trim()).filter(Boolean);
+  return characters.slice(0, 2).join("") || "成";
+}
+
+export function memberPresentation(item, index = 0) {
+  const value = item && typeof item === "object" ? item : { accountId: item };
+  const fullname = String(value.fullname || value.name || value.title || value.label || "未命名成员");
+  const accountId = String(value.accountId || value.id || "");
+  const avatar = String(value.avatar || value.avatarUrl || value.photo || value.head || "");
+  return {
+    ...value,
+    accountId,
+    fullname,
+    avatar,
+    initials: memberInitials(fullname),
+    color: memberColor(accountId || `${fullname}-${index}`)
+  };
+}
+
+export function memberPresentations(raw) {
+  return memberItems(raw).map((item, index) => memberPresentation(item, index));
+}
+
+const ENTITY_META = {
+  department: { id: ["departmentId", "id"], name: ["departmentName", "fullname", "name", "title"] },
+  appRole: { id: ["roleId", "id"], name: ["roleName", "name", "title"] },
+  orgRole: { id: ["organizeId", "orgRoleId", "id"], name: ["organizeName", "orgRoleName", "name", "title"] }
+};
+
+function firstValue(item, keys) {
+  for (const key of keys) if (item?.[key] !== undefined && item?.[key] !== null && item?.[key] !== "") return item[key];
+  return "";
+}
+
+export function entityItems(raw, kind) {
+  const meta = ENTITY_META[kind];
+  if (!meta) return [];
+  const parsed = safeJson(raw, raw);
+  const list = Array.isArray(parsed) ? parsed : parsed && typeof parsed === "object" ? [parsed] : [];
+  return list.map((item) => {
+    const value = item && typeof item === "object" ? item : {};
+    return { ...value, id: String(firstValue(value, meta.id) || ""), name: String(firstValue(value, meta.name) || "未命名") };
+  });
+}
+
+export function attachmentItems(raw) {
+  const parsed = safeJson(raw, raw);
+  const list = Array.isArray(parsed) ? parsed : parsed && typeof parsed === "object" ? [parsed] : [];
+  return list.map((item, index) => {
+    const value = item && typeof item === "object" ? item : {};
+    const name = String(value.originalFilename || value.originalFileName || value.fileName || value.name || `附件 ${index + 1}`);
+    const candidateUrl = String(value.previewUrl || value.downloadUrl || value.url || value.fileUrl || value.path || "").trim();
+    const url = /^(?:https?:|blob:|\/)/i.test(candidateUrl) ? candidateUrl : "";
+    const extension = String(value.ext || value.extension || name.split(".").pop() || "").toLowerCase();
+    const mime = String(value.mimeType || value.contentType || value.type || "");
+    const image = mime.startsWith("image/") || /^(?:avif|bmp|gif|ico|jpe?g|png|svg|webp)$/.test(extension);
+    return { ...value, name, url, image, size: Number(value.fileSize || value.size || 0) || 0 };
+  });
+}
+
+export function locationValue(raw) {
+  const parsed = safeJson(raw, raw);
+  const value = Array.isArray(parsed) ? parsed[0] : parsed;
+  if (!value || typeof value !== "object") return null;
+  return {
+    ...value,
+    name: String(value.name || value.title || value.address || ""),
+    address: String(value.address || value.name || value.title || ""),
+    lat: String(value.lat ?? value.latitude ?? value.y ?? ""),
+    lng: String(value.lng ?? value.longitude ?? value.x ?? "")
+  };
+}
+
+export function richTextSummary(raw) {
+  return String(raw || "")
+    .replace(/<script\b[^>]*>[\s\S]*?<\/script>/gi, " ")
+    .replace(/<style\b[^>]*>[\s\S]*?<\/style>/gi, " ")
+    .replace(/<[^>]+>/g, " ")
+    .replace(/&nbsp;/gi, " ").replace(/&amp;/gi, "&").replace(/&lt;/gi, "<").replace(/&gt;/gi, ">")
+    .replace(/\s+/g, " ").trim();
+}
+
+function advancedSettingOf(control = {}) {
+  const raw = control.advancedSetting;
+  if (!raw) return {};
+  if (typeof raw === "object") return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_) { return {}; }
+}
+
+function numericValue(raw) {
+  if (typeof raw === "number") return Number.isFinite(raw) ? raw : null;
+  if (typeof raw !== "string") return null;
+  const text = raw.trim().replace(/,/g, "");
+  if (!/^-?(?:\d+\.?\d*|\.\d+)$/.test(text)) return null;
+  const value = Number(text);
+  return Number.isFinite(value) ? value : null;
+}
+
+function currencyPrefix(control, advanced, unit) {
+  if (Number(control.type) !== 8) return "";
+  const candidates = [
+    unit,
+    control.currency,
+    control.currencyCode,
+    control.currencycode,
+    advanced.currency,
+    advanced.currencyCode,
+    advanced.currencycode
+  ].map((value) => String(value ?? "").trim()).filter(Boolean);
+  for (const candidate of candidates) {
+    const embeddedSymbol = [...CURRENCY_PREFIXES]
+      .sort((left, right) => right.length - left.length)
+      .find((symbol) => candidate.includes(symbol));
+    if (embeddedSymbol) return embeddedSymbol;
+    const code = candidate.toUpperCase().match(/(?:^|[^A-Z])([A-Z]{3})(?:[^A-Z]|$)/)?.[1]
+      || (/^[A-Z]{3}$/i.test(candidate) ? candidate.toUpperCase() : "");
+    if (code && CURRENCY_SYMBOL_BY_CODE[code]) return CURRENCY_SYMBOL_BY_CODE[code];
+  }
+  return "";
+}
+
+function affixesOf(control, advanced, percentage) {
+  if (percentage) return { prefix: "", suffix: "%" };
+  const explicitPrefix = String(advanced.prefix ?? "").trim();
+  const explicitSuffix = String(advanced.suffix ?? "").trim();
+  if (explicitPrefix || explicitSuffix) return { prefix: explicitPrefix, suffix: explicitSuffix };
+  const unit = String(control.unit ?? "").trim();
+  const currency = currencyPrefix(control, advanced, unit);
+  if (currency) return { prefix: currency, suffix: "" };
+  if (!unit) return { prefix: "", suffix: "" };
+  return CURRENCY_PREFIXES.has(unit) ? { prefix: unit, suffix: "" } : { prefix: "", suffix: unit };
+}
+
+function percentageEnabled(control, advanced) {
+  return [1, "1"].includes(advanced.numshow ?? advanced.showtype ?? advanced.summaryresult ?? control.numshow ?? control.showtype);
+}
+
+export function numberPresentation(control = {}, raw) {
+  const type = Number(control.type);
+  if (!NUMERIC_PRESENTATION_TYPES.has(type)) return null;
+  if (raw === undefined || raw === null || raw === "") {
+    const advanced = advancedSettingOf(control);
+    const percentage = percentageEnabled(control, advanced);
+    const affixes = affixesOf(control, advanced, percentage);
+    return { rawValue: raw, formattedValue: "", percentage, ...affixes };
+  }
+  const value = numericValue(raw);
+  if (value === null) return null;
+  const advanced = advancedSettingOf(control);
+  const percentage = percentageEnabled(control, advanced);
+  const displayValue = percentage ? value * 100 : value;
+  const configuredDot = Number(control.dot ?? advanced.dot);
+  const hasConfiguredDot = Number.isFinite(configuredDot);
+  const digits = hasConfiguredDot ? Math.max(0, Math.min(14, Math.trunc(configuredDot))) : 2;
+  const minimumFractionDigits = hasConfiguredDot || type !== 6 ? digits : 0;
+  const maximumFractionDigits = hasConfiguredDot || type !== 6 ? digits : 8;
+  const useGrouping = ![1, "1"].includes(advanced.thousandth ?? control.thousandth);
+  const formattedValue = displayValue.toLocaleString("zh-CN", {
+    useGrouping,
+    minimumFractionDigits,
+    maximumFractionDigits
+  });
+  return { rawValue: raw, formattedValue, percentage, ...affixesOf(control, advanced, percentage) };
+}
+
+export function numberPresentationText(presentation) {
+  if (!presentation?.formattedValue) return "";
+  if (presentation.percentage) return `${presentation.formattedValue}%`;
+  return [presentation.prefix, presentation.formattedValue, presentation.suffix].filter(Boolean).join(" ");
+}
+
+function regionText(raw) {
+  const parsed = safeJson(raw, raw);
+  if (typeof parsed === "string") return parsed;
+  const list = Array.isArray(parsed) ? parsed : parsed && typeof parsed === "object" ? [parsed] : [];
+  return list.map((item) => item?.name || item?.title || item?.text || item?.value || "").filter(Boolean).join(" / ");
+}
+
 export function displayValue(control, raw) {
   if (raw === undefined || raw === null || raw === "") return "";
   const kind = getFieldKind(control, raw);
@@ -114,16 +327,18 @@ export function displayValue(control, raw) {
     return itemLabels(relationItems(raw), ["sid", "rowid"]).join(", ");
   }
   if (kind === "member") {
-    const members = safeJson(raw, raw);
-    return Array.isArray(members) ? itemLabels(members, ["accountId", "id"]).join(", ") : String(raw);
+    return memberPresentations(raw).map((member) => member.fullname).join(", ");
   }
-  if (kind === "number") {
-    const number = Number(raw);
-    if (!Number.isFinite(number)) return String(raw);
-    return Number(control.type) === 8
-      ? number.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: Number(control.dot ?? 2) })
-      : number.toLocaleString("zh-CN", { maximumFractionDigits: Number(control.dot ?? 8) });
+  if (["department", "appRole", "orgRole"].includes(kind)) return entityItems(raw, kind).map((item) => item.name).join(", ");
+  if (kind === "attachment") return attachmentItems(raw).map((item) => item.name).join(", ");
+  if (kind === "location") {
+    const location = locationValue(raw);
+    return location ? [location.name, location.address !== location.name ? location.address : ""].filter(Boolean).join(" · ") : "";
   }
+  if (kind === "region") return regionText(raw);
+  if (kind === "richText") return richTextSummary(raw);
+  const numericPresentation = numberPresentation(control, raw);
+  if (numericPresentation) return numberPresentationText(numericPresentation);
   return String(raw);
 }
 
@@ -131,9 +346,10 @@ export function valueLabels(control, raw) {
   const kind = getFieldKind(control, raw);
   if (kind === "select" || kind === "multiSelect") return displayValue(control, raw).split(/,\s*/).filter(Boolean);
   if (kind === "member") {
-    const members = safeJson(raw, raw);
-    return Array.isArray(members) ? itemLabels(members, ["accountId", "id"]) : [];
+    return memberPresentations(raw).map((member) => member.fullname);
   }
+  if (["department", "appRole", "orgRole"].includes(kind)) return entityItems(raw, kind).map((item) => item.name);
+  if (kind === "attachment") return attachmentItems(raw).map((item) => item.name);
   if (kind === "relation") {
     const items = relationItems(raw);
     return items.length ? itemLabels(items, ["sid", "rowid"]) : displayValue(control, raw) ? [displayValue(control, raw)] : [];
@@ -178,20 +394,61 @@ function parseInput(input, control) {
     const error = parsed.find((item) => item?.error);
     return error ? { error: error.error } : { value: parsed.filter(Boolean).map((item) => item.key) };
   }
-  if (kind === "member" || kind === "relation") return { error: "请打开记录选择器选择，不能直接粘贴名称" };
+  if (["member", "department", "orgRole", "appRole", "relation", "location"].includes(kind)) return { error: "请打开原生选择器选择，不能直接粘贴文本" };
+  if (["attachment", "region", "richText"].includes(kind)) return { error: "此字段请在 HAP 原生记录窗口中编辑" };
+  if (kind === "formattedText") {
+    const type = Number(control.type);
+    if (type === 5 && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) return { error: "请输入有效邮箱地址" };
+    if (type === 3 && !/^\+?[\d\s()-]{6,20}$/.test(text)) return { error: "请输入有效手机号码" };
+    if (type === 4 && !/^\+?[\d\s()-]{5,24}(?:-\d{1,8})?$/.test(text)) return { error: "请输入有效座机号码" };
+    const setting = control.advancedSetting || {};
+    const min = Number(setting.minlength ?? setting.minLength);
+    const max = Number(setting.maxlength ?? setting.maxLength);
+    if (Number.isFinite(min) && min > 0 && text.length < min) return { error: `内容至少需要 ${min} 个字符` };
+    if (Number.isFinite(max) && max > 0 && text.length > max) return { error: `内容最多允许 ${max} 个字符` };
+  }
   return { value: input ?? "" };
 }
 
 function validateValue(value, control, required = Boolean(control.required)) {
-  if (required && (value === "" || value === null || value === undefined || (Array.isArray(value) && !value.length))) return "此字段为必填字段";
+  const kind = getFieldKind(control, value);
+  const empty = value === "" || value === null || value === undefined || (Array.isArray(value) && !value.length);
+  if (required && empty) return "此字段为必填字段";
+  if (empty) return null;
+  if (kind === "select" || kind === "multiSelect") {
+    const parsed = safeJson(value, value);
+    if (Array.isArray(parsed) && !parsed.length) return required ? "此字段为必填字段" : null;
+    const keys = keysFrom(value);
+    if (!keys.length) return "选项值格式无效，请重新选择";
+    if (keys.some((key) => !["string", "number"].includes(typeof key) || String(key).trim() === "")) return "选项值格式无效，请重新选择";
+  }
+  if (kind === "member") {
+    const items = memberItems(value);
+    if (!items.length || items.some((item) => !(item.accountId || item.id))) return "成员值缺少账号 ID，请重新选择";
+  }
+  if (["department", "appRole", "orgRole"].includes(kind)) {
+    const items = entityItems(value, kind);
+    if (!items.length || items.some((item) => !item.id)) return "组织实体值缺少 ID，请重新选择";
+  }
+  if (kind === "relation") {
+    const items = relationItems(value);
+    if (!items.length || items.some((item) => !(item?.sid || item?.rowid || item?.id))) return "关联记录值缺少记录 ID，请重新选择";
+  }
+  if (kind === "location") {
+    const parsed = safeJson(value, null);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return "定位值格式无效，请重新选择";
+  }
   return null;
 }
 
 function serializeValue(value, control) {
   const kind = getFieldKind(control, value);
-  if (kind === "select" || kind === "multiSelect") return JSON.stringify(value || []);
-  if (kind === "member") return JSON.stringify((Array.isArray(value) ? value : []).map((item) => ({ accountId: item?.accountId || item?.id || item })));
-  if (kind === "relation") return JSON.stringify((Array.isArray(value) ? value : []).map((item) => ({ sid: item?.sid || item?.rowid || item?.id || item })));
+  if (kind === "select" || kind === "multiSelect") return JSON.stringify(keysFrom(value));
+  if (kind === "member") return JSON.stringify(memberItems(value).map((item) => ({ accountId: item.accountId || item.id })));
+  if (kind === "department") return JSON.stringify(entityItems(value, kind).map((item) => ({ departmentId: item.id })));
+  if (kind === "orgRole") return JSON.stringify(entityItems(value, kind).map((item) => ({ organizeId: item.id })));
+  if (kind === "relation") return JSON.stringify(relationItems(value).map((item) => ({ sid: item?.sid || item?.rowid || item?.id })));
+  if (kind === "location") return value ? JSON.stringify(safeJson(value, value)) : "";
   if (kind === "checkbox") return value ? 1 : 0;
   return value ?? "";
 }
@@ -211,10 +468,17 @@ export function createFieldAdapter(control = {}) {
     control,
     kind,
     writable: isWritableControl(control),
+    nativeEditor: NATIVE_EDITOR_TYPES.has(Number(control.type)),
     options: optionsOf(control),
     optionTag: (key) => optionPresentation(control, key),
     optionTags: (raw) => optionTags(control, raw),
+    memberTags: (raw) => kind === "member" ? memberPresentations(raw) : [],
+    entityTags: (raw) => ["department", "appRole", "orgRole"].includes(kind) ? entityItems(raw, kind) : [],
+    attachments: (raw) => kind === "attachment" ? attachmentItems(raw) : [],
+    locationValue: (raw) => kind === "location" ? locationValue(raw) : null,
+    numberPresentation: (raw) => numberPresentation(control, raw),
     display: (raw) => displayValue(control, raw),
+    clipboardText: (raw) => numberPresentation(control, raw) ? String(raw ?? "").replace(/,/g, "") : displayValue(control, raw),
     labels: (raw) => valueLabels(control, raw),
     relationLinks: (raw) => kind === "relation" ? relationLinks(raw) : [],
     parseEditor: (input) => parseInput(input, control),

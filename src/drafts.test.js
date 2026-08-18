@@ -37,4 +37,68 @@ describe("draft persistence", () => {
     expect(restored.migrated).toBe(true);
     expect(restored.rows[0].state).toBe("new");
   });
+
+  it("migrates v2 failure state into the v3 shape", () => {
+    const storage = memoryStorage();
+    const structureHash = JSON.stringify([["name", 2, "名称", undefined, undefined, undefined, []]]);
+    storage.setItem(draftKey(config, 2), JSON.stringify({
+      version: 2,
+      structureHash,
+      rows: [{ key: "unknown", rowId: null, state: "unknown", values: { name: "可能已保存" }, dirtyFields: ["name"], saveError: "网络中断" }]
+    }));
+    const restored = loadDrafts(config, controls, storage);
+    expect(restored.migrated).toBe(true);
+    expect(restored.rows[0]).toMatchObject({ state: "unknown", saveDetails: null, commitBatchId: "" });
+  });
+
+  it("preserves member avatar metadata in a draft", () => {
+    const storage = memoryStorage();
+    const memberControls = [{ controlId: "reporter", type: 26, controlName: "填报人" }];
+    const member = [{ accountId: "account-1", fullname: "张三", avatar: "https://example.com/avatar.png" }];
+    saveDrafts(config, memberControls, [{
+      key: "member-draft",
+      rowId: null,
+      state: "new",
+      values: { reporter: member },
+      dirtyFields: ["reporter"],
+      cellErrors: {}
+    }], storage);
+    const restored = loadDrafts(config, memberControls, storage);
+    expect(restored.rows[0].values.reporter).toEqual(member);
+  });
+
+  it("removes readonly errors and dirty fields left by older paste behavior", () => {
+    const storage = memoryStorage();
+    const mixedControls = [
+      { controlId: "amount", type: 8, controlName: "含税单价" },
+      { controlId: "formula", type: 31, controlName: "含税金额" }
+    ];
+    saveDrafts(config, mixedControls, [{
+      key: "mixed",
+      rowId: "row-1",
+      state: "error",
+      values: { amount: 498, formula: 1000 },
+      dirtyFields: ["amount", "formula"],
+      cellErrors: { formula: "此字段为只读字段" },
+      saveError: "请修正字段错误"
+    }], storage);
+    const restored = loadDrafts(config, mixedControls, storage);
+    expect(restored.rows[0]).toEqual(expect.objectContaining({
+      state: "modified",
+      dirtyFields: ["amount"],
+      cellErrors: {},
+      saveError: ""
+    }));
+  });
+
+  it("drops drafts that only contain stale readonly paste errors", () => {
+    const storage = memoryStorage();
+    const readonlyControls = [{ controlId: "formula", type: 31, controlName: "含税金额" }];
+    storage.setItem(draftKey(config, 3), JSON.stringify({
+      version: 3,
+      structureHash: JSON.stringify([["formula", 31, "含税金额", undefined, undefined, undefined, []]]),
+      rows: [{ key: "readonly-only", rowId: null, state: "new", values: { formula: "" }, dirtyFields: ["formula"], cellErrors: { formula: "此字段为只读字段" } }]
+    }));
+    expect(loadDrafts(config, readonlyControls, storage).rows).toEqual([]);
+  });
 });
