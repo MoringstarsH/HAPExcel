@@ -129,6 +129,50 @@ export default function App() {
   const [columnWidths, setColumnWidths] = useState({});
   const [saveProgress, setSaveProgress] = useState(null);
   const [hydrated, setHydrated] = useState(false);
+  const hydratingRelationsRef = useRef(new Set());
+
+  useEffect(() => {
+    if (!hydrated) return;
+    const pending = [];
+    rows.forEach((row, rowIndex) => {
+      adapters.forEach((adapter) => {
+        if (adapter.kind !== "relation") return;
+        const fieldId = adapter.control.controlId;
+        const items = adapter.relationLinks(row.values[fieldId]);
+        items.forEach((link, itemIndex) => {
+          if (!link.recordId || link.label !== "正在获取标题…") return;
+          const key = `${row.clientId}:${fieldId}:${itemIndex}:${link.recordId}`;
+          if (hydratingRelationsRef.current.has(key)) return;
+          hydratingRelationsRef.current.add(key);
+          pending.push(gateway.hydrateRelation(adapter.control, link.raw).then((relation) => ({ rowIndex, fieldId, itemIndex, relation, key })));
+        });
+      });
+    });
+    if (!pending.length) return;
+    let cancelled = false;
+    Promise.all(pending).then((results) => {
+      results.forEach(({ key }) => hydratingRelationsRef.current.delete(key));
+      if (cancelled) return;
+      setRows((current) => current.map((row, rowIndex) => {
+        const updates = results.filter((item) => item.rowIndex === rowIndex);
+        if (!updates.length) return row;
+        const values = { ...row.values };
+        const originalValues = { ...row.originalValues };
+        updates.forEach(({ fieldId, itemIndex, relation }) => {
+          const currentItems = Array.isArray(values[fieldId]) ? [...values[fieldId]] : safeJson(values[fieldId], []);
+          currentItems[itemIndex] = relation;
+          values[fieldId] = currentItems;
+          if (!row.dirtyFields?.includes(fieldId)) {
+            const originals = Array.isArray(originalValues[fieldId]) ? [...originalValues[fieldId]] : safeJson(originalValues[fieldId], []);
+            if (originals[itemIndex]) originals[itemIndex] = relation;
+            originalValues[fieldId] = originals;
+          }
+        });
+        return { ...row, values, originalValues };
+      }));
+    });
+    return () => { cancelled = true; };
+  }, [adapters, gateway, hydrated, rows]);
 
   const columns = useMemo(() => controls.map((control) => {
     const title = `${control.controlName || control.controlId}${control.required ? " *" : ""}`;

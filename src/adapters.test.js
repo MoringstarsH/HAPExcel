@@ -32,6 +32,11 @@ describe("field adapters", () => {
       expect.objectContaining({ label: "供应商 A", recordId: "row-b" })
     ]);
   });
+  it("never exposes a relation record id as its visible label", () => {
+    expect(relationLinks([{ sid: "c099989f-ca0a-48eb-9505-eb06e6dc7112" }])).toEqual([
+      expect.objectContaining({ label: "正在获取标题…", recordId: "c099989f-ca0a-48eb-9505-eb06e6dc7112" })
+    ]);
+  });
   it("degrades count-only and malformed relation values safely", () => {
     expect(relationLinks(3)).toEqual([]);
     expect(relationLinks("not-json")).toEqual([]);

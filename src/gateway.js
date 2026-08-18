@@ -1,5 +1,34 @@
 import { api, md_emitter, utils } from "mdye";
 
+const worksheetMetaCache = new Map();
+
+function controlsOf(response) {
+  return response?.template?.controls || response?.data?.template?.controls || response?.controls || response?.data?.controls || [];
+}
+
+function titleText(value) {
+  if (value === undefined || value === null || value === "") return "";
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) return value.map(titleText).filter(Boolean).join(", ");
+  return String(value.fullname || value.name || value.title || value.label || value.value || "");
+}
+
+export function relationTitleControl(control, targetControls = []) {
+  const configuredId = control?.advancedSetting?.showtitleid;
+  return targetControls.find((item) => item.controlId === configuredId)
+    || targetControls.find((item) => Number(item.attribute) === 1)
+    || null;
+}
+
+export function normalizeRelationRecord(record, titleControl) {
+  const value = record && typeof record === "object" ? record : { rowid: record };
+  const sid = value.sid || value.rowid || value.id || "";
+  const dynamicTitle = titleControl?.controlId ? titleText(value[titleControl.controlId]) : "";
+  const name = dynamicTitle || titleText(value.fullname || value.name || value.title || value.label);
+  return { ...value, sid, name };
+}
+
 function rowsOf(response) {
   if (Array.isArray(response?.data)) return response.data;
   if (Array.isArray(response)) return response;
@@ -13,6 +42,25 @@ function totalOf(response) {
 }
 
 export function createGateway({ appId, worksheetId, viewId }) {
+  const relationRecordCache = new Map();
+  async function relationMetadata(control) {
+    const targetWorksheetId = control?.dataSource || worksheetId;
+    const inlineControls = Array.isArray(control?.relationControls) ? control.relationControls : [];
+    if (inlineControls.length) return { targetWorksheetId, controls: inlineControls };
+    const metadataKey = `${appId || ""}:${targetWorksheetId}`;
+    if (!worksheetMetaCache.has(metadataKey)) {
+      worksheetMetaCache.set(metadataKey, api.getWorksheetInfo({
+        appId,
+        worksheetId: targetWorksheetId,
+        getTemplate: true
+      }).then((response) => ({ targetWorksheetId, controls: controlsOf(response) })).catch((error) => {
+        worksheetMetaCache.delete(metadataKey);
+        throw error;
+      }));
+    }
+    return worksheetMetaCache.get(metadataKey);
+  }
+
   return {
     async loadPage({ pageIndex = 1, pageSize = 100, filters } = {}) {
       return rowsOf(await api.getFilterRows({ worksheetId, viewId, pageIndex, pageSize, notGetTotal: true, ...(filters || {}) }));
@@ -27,7 +75,40 @@ export function createGateway({ appId, worksheetId, viewId }) {
     async selectUsers(control) { return utils.selectUsers({ unique: Number(control?.enumDefault) === 1 }); },
     async selectRelation(control) {
       const multiple = !(Number(control?.enumDefault) === 1 || Number(control?.subType) === 1);
-      return utils.selectRecord({ relateSheetId: control?.dataSource || worksheetId, multiple });
+      const metadataPromise = relationMetadata(control);
+      const selected = await utils.selectRecord({ relateSheetId: control?.dataSource || worksheetId, multiple });
+      if (!selected) return selected;
+      const metadata = await metadataPromise;
+      const titleControl = relationTitleControl(control, metadata.controls);
+      const list = Array.isArray(selected) ? selected : [selected];
+      return list.map((record) => normalizeRelationRecord(record, titleControl));
+    },
+    async hydrateRelation(control, record) {
+      const normalized = normalizeRelationRecord(record);
+      if (!normalized.sid || normalized.name) return normalized;
+      const cacheKey = `${control?.dataSource || worksheetId}:${normalized.sid}`;
+      if (relationRecordCache.has(cacheKey)) return relationRecordCache.get(cacheKey);
+      const request = (async () => {
+        try {
+          const metadata = await relationMetadata(control);
+          const titleControl = relationTitleControl(control, metadata.controls);
+          if (!titleControl) return { ...normalized, name: "标题获取失败", titleResolveFailed: true };
+          const response = await api.getRowDetail({
+            appId,
+            worksheetId: metadata.targetWorksheetId,
+            viewId: control?.viewId || control?.relationViewId || control?.advancedSetting?.viewid || "",
+            rowId: normalized.sid,
+            getTemplate: false
+          });
+          const detail = response?.data || response || {};
+          const hydrated = normalizeRelationRecord({ ...detail, sid: normalized.sid }, titleControl);
+          return hydrated.name ? hydrated : { ...normalized, name: "标题获取失败", titleResolveFailed: true };
+        } catch (_) {
+          return { ...normalized, name: "标题获取失败", titleResolveFailed: true };
+        }
+      })();
+      relationRecordCache.set(cacheKey, request);
+      return request;
     },
     async openRelationRecord(control, relation) {
       const targetWorksheetId = control?.dataSource;

@@ -54,7 +54,7 @@ export function relationLinks(raw) {
     const sourceValue = safeJson(value.sourcevalue, {});
     const source = sourceValue && typeof sourceValue === "object" ? sourceValue : {};
     const recordId = value.sid || value.rowid || value.id || source.rowid || source.rowId || source.id || "";
-    const label = value.fullname || value.name || value.title || value.label || recordId || String(item ?? "");
+    const label = value.fullname || value.name || value.title || value.label || (recordId ? "正在获取标题…" : "标题获取失败");
     return { label: String(label), recordId: String(recordId || ""), raw: item };
   }).filter((item) => item.label);
 }
