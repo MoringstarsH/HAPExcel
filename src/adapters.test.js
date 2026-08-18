@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { createFieldAdapter, getFieldKind } from "./adapters";
+import { createFieldAdapter, getFieldKind, relationLinks } from "./adapters";
 
 const options = [{ key: "a", value: "待处理" }, { key: "b", value: "已完成" }];
 
@@ -23,5 +23,20 @@ describe("field adapters", () => {
   it("keeps member and relation clipboard input explicit", () => {
     expect(createFieldAdapter({ type: 26 }).parseEditor("张三").error).toContain("选择器");
     expect(createFieldAdapter({ type: 29 }).parseEditor("客户").error).toContain("选择器");
+  });
+  it("keeps relation labels and target record ids for clickable tags", () => {
+    expect(relationLinks('[{"sid":"row-a","name":"螺纹钢"}]')).toEqual([
+      expect.objectContaining({ label: "螺纹钢", recordId: "row-a" })
+    ]);
+    expect(relationLinks([{ name: "供应商 A", sourcevalue: JSON.stringify({ rowid: "row-b" }) }])).toEqual([
+      expect.objectContaining({ label: "供应商 A", recordId: "row-b" })
+    ]);
+  });
+  it("degrades count-only and malformed relation values safely", () => {
+    expect(relationLinks(3)).toEqual([]);
+    expect(relationLinks("not-json")).toEqual([]);
+    expect(relationLinks([{ name: "无法定位的记录" }])).toEqual([
+      expect.objectContaining({ label: "无法定位的记录", recordId: "" })
+    ]);
   });
 });

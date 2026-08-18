@@ -81,6 +81,28 @@ function ChoicePopover({ picker, adapter, value, onApply, onClose }) {
   </>;
 }
 
+function RelationDisplay({ links, fallback, canOpen, onOpen }) {
+  if (!links.length) return fallback;
+  return <span className="relation-tags">
+    {links.map((link, index) => {
+      const clickable = canOpen && Boolean(link.recordId);
+      return clickable
+        ? <button
+            type="button"
+            className="relation-tag relation-link"
+            key={`${link.recordId}-${index}`}
+            title={`打开关联记录：${link.label}`}
+            aria-label={`打开关联记录：${link.label}`}
+            onPointerDown={(event) => event.stopPropagation()}
+            onDoubleClick={(event) => event.stopPropagation()}
+            onKeyDown={(event) => event.stopPropagation()}
+            onClick={(event) => { event.stopPropagation(); onOpen(link); }}
+          >{link.label}</button>
+        : <span className="relation-tag" key={`${link.label}-${index}`}>{link.label}</span>;
+    })}
+  </span>;
+}
+
 export default function App() {
   const runtimeConfig = config || {};
   const controls = useMemo(() => getControls(runtimeConfig), [runtimeConfig]);
@@ -291,6 +313,22 @@ export default function App() {
     setEditingCell(cell);
   }, [activateCell, adapters, applyChanges, rows]);
 
+  const openRelationRecord = useCallback(async (adapter, relation) => {
+    try {
+      const result = await gateway.openRelationRecord(adapter.control, relation);
+      if (result?.action !== "update" && result?.action !== "delete") return;
+      if (rows.some(hasPendingChange)) {
+        setRefreshPending(true);
+        setMessage("关联记录已变化；当前草稿未覆盖，保存或放弃后可刷新");
+        return;
+      }
+      await loadInitial(filtersRef.current);
+      setMessage(result.action === "delete" ? "关联记录已删除，列表已刷新" : "关联记录已更新，列表已刷新");
+    } catch (error) {
+      setMessage(`无法打开关联记录：${error?.message || "记录不存在或没有查看权限"}`);
+    }
+  }, [gateway, loadInitial, rows]);
+
   const handleGridKeyDown = useCallback((event) => {
     if (editingCell || !cellSelection) return;
     const keyMoves = { ArrowLeft: [-1, 0], ArrowRight: [1, 0], ArrowUp: [0, -1], ArrowDown: [0, 1] };
@@ -457,6 +495,7 @@ export default function App() {
                     const selected = containsCell(cellSelection, columnIndex, rowIndex);
                     const editing = sameCell(editingCell, cell);
                     const display = adapter.kind === "checkbox" ? (raw ? "✓" : "") : adapter.display(raw);
+                    const relationItems = adapter.relationLinks(raw);
                     return <td
                       key={fieldId}
                       data-grid-row={rowIndex}
@@ -486,7 +525,14 @@ export default function App() {
                             }}
                           />
                         : <div className={`cell-display kind-${adapter.kind}`}>
-                            {display || (!disabled && ["select", "multiSelect", "member", "relation"].includes(adapter.kind) ? <span className="cell-placeholder">请选择</span> : "")}
+                            {adapter.kind === "relation" && relationItems.length
+                              ? <RelationDisplay
+                                  links={relationItems}
+                                  fallback={display}
+                                  canOpen={row.state !== "deleted"}
+                                  onOpen={(relation) => openRelationRecord(adapter, relation)}
+                                />
+                              : display || (!disabled && ["select", "multiSelect", "member", "relation"].includes(adapter.kind) ? <span className="cell-placeholder">请选择</span> : "")}
                           </div>}
                       {error && <small>{error}</small>}
                     </td>;

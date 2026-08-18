@@ -42,10 +42,21 @@ function keysFrom(raw) {
   return value ? [value] : [];
 }
 
-function relationItems(raw) {
+export function relationItems(raw) {
   if (typeof raw === "number" || (typeof raw === "string" && /^\d+$/.test(raw))) return [];
   const rows = safeJson(raw, raw);
   return Array.isArray(rows) ? rows : [];
+}
+
+export function relationLinks(raw) {
+  return relationItems(raw).map((item) => {
+    const value = item && typeof item === "object" ? item : { name: item };
+    const sourceValue = safeJson(value.sourcevalue, {});
+    const source = sourceValue && typeof sourceValue === "object" ? sourceValue : {};
+    const recordId = value.sid || value.rowid || value.id || source.rowid || source.rowId || source.id || "";
+    const label = value.fullname || value.name || value.title || value.label || recordId || String(item ?? "");
+    return { label: String(label), recordId: String(recordId || ""), raw: item };
+  }).filter((item) => item.label);
 }
 
 function itemLabels(items, keys) {
@@ -151,6 +162,7 @@ export function createFieldAdapter(control = {}) {
     options: optionsOf(control),
     display: (raw) => displayValue(control, raw),
     labels: (raw) => valueLabels(control, raw),
+    relationLinks: (raw) => kind === "relation" ? relationLinks(raw) : [],
     parseEditor: (input) => parseInput(input, control),
     parseClipboard: (input) => parseInput(input, control),
     validate: (value, required = Boolean(control.required)) => validateValue(value, control, required),

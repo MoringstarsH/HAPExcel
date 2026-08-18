@@ -29,6 +29,15 @@ export function createGateway({ appId, worksheetId, viewId }) {
       const multiple = !(Number(control?.enumDefault) === 1 || Number(control?.subType) === 1);
       return utils.selectRecord({ relateSheetId: control?.dataSource || worksheetId, multiple });
     },
+    async openRelationRecord(control, relation) {
+      const targetWorksheetId = control?.dataSource;
+      const recordId = relation?.recordId || relation?.sid || relation?.rowid || relation?.id;
+      if (!targetWorksheetId) throw new Error("关联字段未配置目标工作表");
+      if (!recordId) throw new Error("关联记录缺少记录 ID");
+      const advancedSetting = control?.advancedSetting || {};
+      const targetViewId = control?.viewId || control?.relationViewId || advancedSetting.viewid || advancedSetting.viewId || "";
+      return utils.openRecordInfo({ appId, worksheetId: targetWorksheetId, viewId: targetViewId, recordId });
+    },
     on(event, handler) {
       md_emitter?.addListener?.(event, handler);
       return () => md_emitter?.removeListener?.(event, handler);

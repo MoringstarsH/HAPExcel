@@ -200,6 +200,41 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 
 .native-grid .cell-display { cursor: cell; }
 .native-grid .cell-display.kind-number { justify-content: flex-end; text-align: right; }
+.native-grid .cell-display.kind-relation { padding-top: 5px; padding-bottom: 5px; }
+.relation-tags {
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+}
+.relation-tag {
+  min-width: 0;
+  max-width: 100%;
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
+  flex: 0 1 auto;
+  padding: 2px 8px;
+  overflow: hidden;
+  color: #1f2329;
+  background: #e8f1ff;
+  border: 0;
+  border-radius: 4px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+button.relation-tag { font-size: inherit; }
+.relation-link { cursor: pointer; }
+.relation-link:hover {
+  color: #245bdb;
+  background: #d7e7ff;
+  text-decoration: underline;
+}
+.relation-link:focus-visible {
+  outline: 2px solid #3370ff;
+  outline-offset: 1px;
+}
 .native-grid .cell-editor { position: relative; z-index: 5; border-color: #3370ff; background: #fff; user-select: text; }
 .native-grid .cell-editor[inputmode=decimal] { text-align: right; }
 .native-grid .cell-editor[type=date],
