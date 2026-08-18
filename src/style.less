@@ -240,14 +240,30 @@ button.relation-tag { font-size: inherit; }
 .native-grid .cell-editor[type=date],
 .native-grid .cell-editor[type=time],
 .native-grid .cell-editor[type=datetime-local] { color-scheme: light; }
-.native-grid td.cell-selected { background: #eaf0ff; }
-.native-grid td.cell-selected .cell-display { background: #eaf0ff; }
+.native-grid td.cell-selected {
+  position: relative;
+  background: transparent;
+}
+.native-grid td.cell-selected::after {
+  content: "";
+  position: absolute;
+  z-index: 6;
+  inset: 0;
+  pointer-events: none;
+  border-color: transparent;
+  border-style: solid;
+}
+.native-grid td.cell-selection-top::after { border-top-width: 2px; border-top-color: #3370ff; }
+.native-grid td.cell-selection-right::after { border-right-width: 2px; border-right-color: #3370ff; }
+.native-grid td.cell-selection-bottom::after { border-bottom-width: 2px; border-bottom-color: #3370ff; }
+.native-grid td.cell-selection-left::after { border-left-width: 2px; border-left-color: #3370ff; }
 .native-grid td.cell-active { box-shadow: inset 0 0 0 2px #3370ff; }
-.native-grid td.cell-active.cell-error { box-shadow: inset 0 0 0 2px #f04438; }
 .native-grid td.cell-editing { overflow: visible; box-shadow: inset 0 0 0 2px #3370ff; }
-.native-grid td.cell-disabled .cell-display { color: #737383; cursor: default; }
+.native-grid td.cell-disabled { background: #f5f6f7; }
+.native-grid td.cell-disabled .cell-display { color: #737383; background: #f5f6f7; cursor: default; }
 .native-grid .cell-placeholder { color: #b6bac0; }
-.native-grid .cell-error { box-shadow: inset 0 0 0 1px #f04438; }
+.native-grid td.cell-error { background: #fdcaca; }
+.native-grid td.cell-error .cell-display { background: #fdcaca; }
 .native-grid .cell-error small { display: none; }
 
 .append-row {

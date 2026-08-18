@@ -1,12 +1,13 @@
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { config } from "mdye";
 import { createFieldAdapter, getControls, safeJson } from "./adapters";
 import { buildPasteChanges, createClipboardPayload, GRID_CLIPBOARD_TYPE, readClipboardMatrix } from "./clipboard";
 import { applyCommitResult, commitRows, validateRows } from "./commit";
 import { clearDrafts, loadDrafts, saveDrafts } from "./drafts";
-import { createGateway } from "./gateway";
+import { createGateway, rowIdOf } from "./gateway";
+import { canUndo, createHistoryState, historyReducer } from "./history";
 import { createDraftRow, createServerRow, editRow, hasPendingChange, markDeleted, mergeRestoredDrafts, mergeServerPage, restoreDeleted } from "./rows";
-import { containsCell, moveSelection, selectionRange } from "./selection";
+import { clampCell, containsCell, moveSelection, selectionRange } from "./selection";
 
 const PAGE_SIZE = 100;
 const MAX_CELLS = 5000;
@@ -116,7 +117,19 @@ export default function App() {
   const filtersRef = useRef();
   const saveTimer = useRef(null);
   const draggingRef = useRef(false);
-  const [rows, setRows] = useState([]);
+  const [rowHistory, dispatchRows] = useReducer(historyReducer, [], createHistoryState);
+  const rows = rowHistory.value;
+  const setRows = useCallback((update, options = {}) => {
+    dispatchRows({
+      type: options.record ? "apply" : "replace",
+      update: typeof update === "function" ? update : undefined,
+      value: typeof update === "function" ? undefined : update,
+      label: options.label,
+      clearHistory: options.clearHistory,
+      rebaseHistory: options.rebaseHistory
+    });
+  }, []);
+  const undoRows = useCallback(() => dispatchRows({ type: "undo" }), []);
   const [total, setTotal] = useState(null);
   const [hasMore, setHasMore] = useState(false);
   const [loadState, setLoadState] = useState("loading");
@@ -130,6 +143,25 @@ export default function App() {
   const [saveProgress, setSaveProgress] = useState(null);
   const [hydrated, setHydrated] = useState(false);
   const hydratingRelationsRef = useRef(new Set());
+
+  useEffect(() => {
+    if (rowHistory.conflict) setMessage("撤销已取消：数据已被外部刷新");
+    else if (rowHistory.lastUndoLabel) setMessage(`已撤销：${rowHistory.lastUndoLabel}`);
+  }, [rowHistory.conflict, rowHistory.lastUndoLabel]);
+
+  useEffect(() => {
+    setSelectedRows((current) => {
+      const available = new Set(rows.map((row) => row.key));
+      const next = current.filter((key) => available.has(key));
+      return next.length === current.length ? current : next;
+    });
+    setCellSelection((current) => {
+      if (!current || !rows.length || !adapters.length) return rows.length && adapters.length ? current : null;
+      const anchor = clampCell(current.anchor, adapters.length, rows.length);
+      const focus = clampCell(current.focus, adapters.length, rows.length);
+      return sameCell(anchor, current.anchor) && sameCell(focus, current.focus) ? current : { anchor, focus };
+    });
+  }, [adapters.length, rows]);
 
   useEffect(() => {
     if (!hydrated) return;
@@ -169,7 +201,7 @@ export default function App() {
           }
         });
         return { ...row, values, originalValues };
-      }));
+      }), { rebaseHistory: true });
     });
     return () => { cancelled = true; };
   }, [adapters, gateway, hydrated, rows]);
@@ -209,7 +241,7 @@ export default function App() {
       if (request !== requestRef.current) return;
       const serverRows = records.map((record) => createServerRow(record, controls));
       const restored = loadDrafts(runtimeConfig, controls);
-      setRows(mergeRestoredDrafts(serverRows, restored.rows, controls));
+      setRows(mergeRestoredDrafts(serverRows, restored.rows, controls), { clearHistory: true });
       setTotal(count ?? (records.length < PAGE_SIZE ? records.length : null));
       setHasMore(count == null ? records.length === PAGE_SIZE : records.length < count);
       loadedServerCountRef.current = records.length;
@@ -232,7 +264,9 @@ export default function App() {
     const nextPage = pageRef.current + 1;
     try {
       const records = await gateway.loadPage({ pageIndex: nextPage, pageSize: PAGE_SIZE, filters: filtersRef.current });
-      setRows((current) => mergeServerPage(current, records, controls));
+      const loadedIds = new Set(rows.filter((row) => row.rowId).map((row) => row.rowId));
+      const overlapsLoadedRow = records.some((record) => loadedIds.has(rowIdOf(record)));
+      setRows((current) => mergeServerPage(current, records, controls), { clearHistory: overlapsLoadedRow });
       pageRef.current = nextPage;
       loadedServerCountRef.current += records.length;
       const nextLoaded = loadedServerCountRef.current;
@@ -243,7 +277,7 @@ export default function App() {
     } finally {
       loadingMoreRef.current = false;
     }
-  }, [controls, gateway, hasMore, loadState, total]);
+  }, [controls, gateway, hasMore, loadState, rows, total]);
 
   useEffect(() => { loadInitial(); }, [loadInitial]);
   useEffect(() => gateway.on("filters-update", (filters) => {
@@ -261,7 +295,7 @@ export default function App() {
     return () => clearTimeout(saveTimer.current);
   }, [controls, hydrated, rows, runtimeConfig]);
 
-  const applyChanges = useCallback((changes) => {
+  const applyChanges = useCallback((changes, label = "编辑单元格") => {
     setRows((current) => {
       const next = [...current];
       changes.forEach(({ rowIndex, columnIndex, input, directValue, parsedValue, parsedError }) => {
@@ -275,8 +309,8 @@ export default function App() {
         next[rowIndex] = editRow(row, adapter.control.controlId, parsed.value, parsed.error);
       });
       return next;
-    });
-  }, [adapters, controls]);
+    }, { record: true, label });
+  }, [adapters, controls, setRows]);
 
   const selectCell = useCallback((cell, extend = false) => {
     setEditingCell(null);
@@ -310,7 +344,7 @@ export default function App() {
     const matrix = readClipboardMatrix(event.clipboardData.getData("text/plain"), event.clipboardData.getData(GRID_CLIPBOARD_TYPE));
     const result = buildPasteChanges({ matrix, selection: cellSelection, adapters, rowCount: rows.length, maxCells: MAX_CELLS, maxNewRows: MAX_NEW_ROWS });
     if (result.fatal) { setMessage(result.fatal); return; }
-    applyChanges(result.changes);
+    applyChanges(result.changes, "批量粘贴");
     if (result.target) setCellSelection({ anchor: { column: result.target.left, row: result.target.top }, focus: { column: result.target.right, row: result.target.bottom } });
     setMessage(result.errors.length ? `已粘贴 ${result.changes.length - result.errors.length} 格，${result.errors.length} 格类型不匹配或只读` : `已粘贴 ${result.changes.length} 个单元格`);
   }, [adapters, applyChanges, cellSelection, editingCell, rows.length]);
@@ -336,7 +370,7 @@ export default function App() {
       const value = adapter.kind === "member"
         ? (unique ? list.slice(0, 1) : list).map((item) => ({ ...item, accountId: item.accountId || item.id || item }))
         : (unique ? list.slice(0, 1) : list).map((item) => ({ ...item, sid: item.sid || item.rowid || item.id || item }));
-      applyChanges([{ rowIndex, columnIndex, directValue: value }]);
+      applyChanges([{ rowIndex, columnIndex, directValue: value }], adapter.kind === "member" ? "选择成员" : "选择关联记录");
     } catch (error) {
       setMessage(`选择失败：${error?.message || "操作已取消"}`);
     }
@@ -351,7 +385,7 @@ export default function App() {
       return;
     }
     if (adapter.kind === "checkbox") {
-      applyChanges([{ rowIndex: cell.row, columnIndex: cell.column, directValue: !Boolean(row.values[adapter.control.controlId]) }]);
+      applyChanges([{ rowIndex: cell.row, columnIndex: cell.column, directValue: !Boolean(row.values[adapter.control.controlId]) }], "切换复选框");
       return;
     }
     setEditingCell(cell);
@@ -386,6 +420,18 @@ export default function App() {
     }
   }, [beginEdit, cellSelection, editingCell, moveCellSelection]);
 
+  const handleUndoKeyDown = useCallback((event) => {
+    const key = String(event.key || "").toLowerCase();
+    if (!(event.ctrlKey || event.metaKey) || event.shiftKey || key !== "z" || event.isComposing) return;
+    if (loadState !== "ready" || picker || !canUndo(rowHistory)) return;
+    const target = event.target;
+    const tagName = target?.tagName?.toLowerCase();
+    const textInput = tagName === "textarea" || target?.isContentEditable || (tagName === "input" && !["checkbox", "radio", "button", "submit", "reset"].includes(target.type));
+    if (textInput) return;
+    event.preventDefault();
+    undoRows();
+  }, [loadState, picker, rowHistory, undoRows]);
+
   const handleGridPointerMove = useCallback((event) => {
     if (!draggingRef.current) return;
     const cell = document.elementFromPoint(event.clientX, event.clientY)?.closest?.("td[data-grid-row]");
@@ -415,7 +461,7 @@ export default function App() {
   function addRow() {
     const draft = createDraftRow(controls);
     const rowIndex = rows.length;
-    setRows((current) => [...current, draft]);
+    setRows((current) => [...current, draft], { record: true, label: "新增记录" });
     const firstWritable = Math.max(0, adapters.findIndex((adapter) => adapter.writable));
     setCellSelection({ anchor: { column: firstWritable, row: rowIndex }, focus: { column: firstWritable, row: rowIndex } });
     setTimeout(() => document.querySelector(`[data-row-key="${draft.key}"] [data-grid-column="${firstWritable}"]`)?.scrollIntoView?.({ block: "nearest", inline: "nearest" }), 0);
@@ -423,7 +469,8 @@ export default function App() {
   }
 
   function toggleDeleteSelected() {
-    const indices = selectedRows.filter((index) => rows[index]);
+    const selectedKeys = new Set(selectedRows);
+    const indices = rows.map((row, index) => selectedKeys.has(row.key) ? index : -1).filter((index) => index >= 0);
     if (!indices.length) { setMessage("请先勾选要删除的行"); return; }
     const allDeleted = indices.every((index) => rows[index].state === "deleted");
     setRows((current) => {
@@ -433,7 +480,7 @@ export default function App() {
         const deleted = markDeleted(row);
         return deleted ? [deleted] : [];
       });
-    });
+    }, { record: true, label: allDeleted ? "撤销删除" : "标记删除" });
     setSelectedRows([]);
     setMessage(allDeleted ? "已撤销待删除标记" : "已标记待删除；保存后才会删除服务端记录");
   }
@@ -442,7 +489,7 @@ export default function App() {
     if (!hasDrafts || loadState === "saving") return;
     const errors = validateRows(rows, adapters);
     if (errors.size) {
-      setRows((current) => current.map((row) => errors.has(row.key) ? { ...row, cellErrors: errors.get(row.key), state: "error", saveError: "请修正字段错误" } : row));
+      setRows((current) => current.map((row) => errors.has(row.key) ? { ...row, cellErrors: errors.get(row.key), state: "error", saveError: "请修正字段错误" } : row), { rebaseHistory: true });
       setMessage(`有 ${errors.size} 行校验失败，请先修正红色单元格`);
       return;
     }
@@ -458,7 +505,8 @@ export default function App() {
     const next = applyCommitResult(rows, result);
     const failedWrites = result.writes.filter((entry) => !entry.ok).length;
     const failed = failedWrites + (result.deletion && !result.deletion.ok ? result.deletion.rowIds.length : 0);
-    setRows(next);
+    const remoteMutation = result.writes.some((entry) => entry.ok) || Boolean(result.deletion?.ok);
+    setRows(next, remoteMutation ? { clearHistory: true } : { rebaseHistory: true });
     setSaveProgress(null);
     if (!failed && !result.deleteSkipped) {
       clearDrafts(runtimeConfig);
@@ -480,11 +528,12 @@ export default function App() {
     loadInitial(filtersRef.current);
   }
 
-  const selectedAllDeleted = selectedRows.length > 0 && selectedRows.every((index) => rows[index]?.state === "deleted");
+  const selectedAllDeleted = selectedRows.length > 0 && selectedRows.every((key) => rows.find((row) => row.key === key)?.state === "deleted");
   const pickerAdapter = picker ? adapters[picker.columnIndex] : null;
   const pickerRow = picker ? rows[picker.rowIndex] : null;
+  const cellSelectionRange = selectionRange(cellSelection);
 
-  return <div className="table-app">
+  return <div className="table-app" onKeyDown={handleUndoKeyDown}>
     <header className="table-toolbar">
       <div className="toolbar-primary">
         <button type="button" className="add-button" onClick={addRow} disabled={loadState === "saving"}><span>＋</span> 新增记录</button>
@@ -524,11 +573,11 @@ export default function App() {
             }}>
               <table className="native-grid">
                 <thead><tr>
-                  <th className="row-marker"><input type="checkbox" aria-label="选择全部记录" checked={rows.length > 0 && selectedRows.length === rows.length} onChange={(event) => setSelectedRows(event.target.checked ? rows.map((_, index) => index) : [])} /></th>
+                  <th className="row-marker"><input type="checkbox" aria-label="选择全部记录" checked={rows.length > 0 && selectedRows.length === rows.length} onChange={(event) => setSelectedRows(event.target.checked ? rows.map((row) => row.key) : [])} /></th>
                   {columns.map((column) => <th key={column.id} style={{ width: column.width, minWidth: column.width }}>{column.title}</th>)}
                 </tr></thead>
                 <tbody>{rows.map((row, rowIndex) => <tr key={row.key} data-row-key={row.key} className={`row-${row.state}`}>
-                  <td className="row-marker"><input type="checkbox" aria-label={`选择第 ${rowIndex + 1} 行`} checked={selectedRows.includes(rowIndex)} onChange={(event) => setSelectedRows((current) => event.target.checked ? [...new Set([...current, rowIndex])] : current.filter((item) => item !== rowIndex))} /><span>{rowIndex + 1}</span></td>
+                  <td className="row-marker"><input type="checkbox" aria-label={`选择第 ${rowIndex + 1} 行`} checked={selectedRows.includes(row.key)} onChange={(event) => setSelectedRows((current) => event.target.checked ? [...new Set([...current, row.key])] : current.filter((item) => item !== row.key))} /><span>{rowIndex + 1}</span></td>
                   {adapters.map((adapter, columnIndex) => {
                     const fieldId = adapter.control.controlId;
                     const raw = row.values[fieldId];
@@ -537,6 +586,12 @@ export default function App() {
                     const cell = { column: columnIndex, row: rowIndex };
                     const active = sameCell(cellSelection?.focus, cell);
                     const selected = containsCell(cellSelection, columnIndex, rowIndex);
+                    const selectionEdges = selected && cellSelectionRange ? [
+                      cellSelectionRange.top === rowIndex && "cell-selection-top",
+                      cellSelectionRange.bottom === rowIndex && "cell-selection-bottom",
+                      cellSelectionRange.left === columnIndex && "cell-selection-left",
+                      cellSelectionRange.right === columnIndex && "cell-selection-right"
+                    ].filter(Boolean) : [];
                     const editing = sameCell(editingCell, cell);
                     const display = adapter.kind === "checkbox" ? (raw ? "✓" : "") : adapter.display(raw);
                     const relationItems = adapter.relationLinks(raw);
@@ -547,7 +602,7 @@ export default function App() {
                       role="gridcell"
                       aria-selected={selected}
                       aria-readonly={disabled}
-                      className={[error && "cell-error", selected && "cell-selected", active && "cell-active", editing && "cell-editing", disabled && "cell-disabled"].filter(Boolean).join(" ")}
+                      className={[error && "cell-error", selected && "cell-selected", ...selectionEdges, active && "cell-active", editing && "cell-editing", disabled && "cell-disabled"].filter(Boolean).join(" ")}
                       title={error || display}
                       onPointerDown={(event) => {
                         if (event.button !== 0 || editing) return;
@@ -561,7 +616,7 @@ export default function App() {
                         ? <CellInputEditor
                             adapter={adapter}
                             raw={raw}
-                            onCommit={(input) => { applyChanges([{ rowIndex, columnIndex, input }]); setEditingCell(null); }}
+                            onCommit={(input) => { applyChanges([{ rowIndex, columnIndex, input }], "编辑单元格"); setEditingCell(null); }}
                             onCancel={() => setEditingCell(null)}
                             onMove={(movement) => {
                               setCellSelection((current) => moveSelection(current, movement.column, movement.row, adapters.length, Math.max(1, rows.length), false));
@@ -590,14 +645,14 @@ export default function App() {
 
     <footer className="table-footer">
       <span>{total == null ? `已加载 ${loadedCount} 条` : `已加载 ${loadedCount} / 共 ${total} 条`}{hasMore ? " · 向下滚动继续加载" : " · 已全部加载"}</span>
-      <span>拖拽或 Shift 扩展选区 · Ctrl/Cmd+C/V 批量复制粘贴 · Enter/F2 编辑</span>
+      <span>拖拽或 Shift 扩展选区 · Ctrl/Cmd+C/V 批量复制粘贴 · Ctrl/Cmd+Z 撤销 · Enter/F2 编辑</span>
     </footer>
 
     {picker && pickerAdapter && pickerRow && <ChoicePopover
       picker={picker}
       adapter={pickerAdapter}
       value={pickerRow.values[pickerAdapter.control.controlId]}
-      onApply={(value) => applyChanges([{ rowIndex: picker.rowIndex, columnIndex: picker.columnIndex, directValue: value }])}
+      onApply={(value) => applyChanges([{ rowIndex: picker.rowIndex, columnIndex: picker.columnIndex, directValue: value }], pickerAdapter.kind === "multiSelect" || pickerAdapter.kind === "select" ? "选择选项" : "编辑字段")}
       onClose={() => setPicker(null)}
     />}
   </div>;
