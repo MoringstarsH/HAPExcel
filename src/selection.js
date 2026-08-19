@@ -38,6 +38,17 @@ export function wholeColumnSelection(columnIndex, columnCount, rowCount, anchorC
   };
 }
 
+export function axisSelection(axis, anchorIndex, focusIndex, columnCount, rowCount) {
+  if (axis === "row") return wholeRowSelection(focusIndex, columnCount, rowCount, anchorIndex);
+  if (axis === "column") return wholeColumnSelection(focusIndex, columnCount, rowCount, anchorIndex);
+  return null;
+}
+
+export function dragThresholdExceeded(start, point, threshold = 4) {
+  if (!start || !point) return false;
+  return Math.hypot(Number(point.x) - Number(start.x), Number(point.y) - Number(start.y)) >= threshold;
+}
+
 export function containsCell(selection, column, row) {
   const range = selectionRange(selection);
   return Boolean(range && column >= range.left && column <= range.right && row >= range.top && row <= range.bottom);

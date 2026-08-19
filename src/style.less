@@ -674,6 +674,7 @@ button.relation-tag { font-size: inherit; }
 .state-panel button { color: #fff; background: #3370ff; }
 
 .table-footer {
+  position: relative;
   min-height: 34px;
   display: flex;
   justify-content: space-between;
@@ -686,6 +687,46 @@ button.relation-tag { font-size: inherit; }
   font-size: 12px;
   white-space: nowrap;
 }
+.table-footer-status { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.table-help-trigger {
+  flex: none;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  min-height: 28px;
+  margin-left: auto;
+  padding: 0;
+  border: 1px solid #c9cdd4;
+  border-radius: 50%;
+  color: #646a73;
+  background: #fff;
+  font-size: 16px;
+  font-weight: 650;
+  line-height: 26px;
+  cursor: pointer;
+}
+.table-help-trigger:hover, .table-help-trigger:focus-visible {
+  color: #245bdb;
+  border-color: #8db4ff;
+  background: #f0f4ff;
+  outline: none;
+}
+.table-help-popover {
+  position: absolute;
+  z-index: 100;
+  right: 16px;
+  bottom: calc(100% + 8px);
+  width: min(340px, calc(100vw - 32px));
+  padding: 12px 14px;
+  color: #1f2329;
+  background: #fff;
+  border: 1px solid #dee0e3;
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(31, 35, 41, .18);
+  white-space: normal;
+}
+.table-help-title { margin-bottom: 8px; color: #1f2329; font-size: 14px; font-weight: 650; }
+.table-help-popover ul { margin: 0; padding-left: 18px; color: #646a73; line-height: 1.8; }
 
 .popover-scrim {
   position: fixed;

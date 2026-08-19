@@ -8,7 +8,7 @@ import { clearDrafts, loadDrafts, saveDrafts } from "./drafts";
 import { createGateway, rowIdOf } from "./gateway";
 import { canRedo, canUndo, createHistoryState, historyReducer } from "./history";
 import { createDraftRow, createServerRow, editRow, hasPendingChange, markDeleted, mergeQueriedRows, mergeRestoredDrafts, mergeServerPage, rebaseRowFromServer, restoreDeleted } from "./rows";
-import { clampCell, containsCell, moveSelection, selectionRange, wholeColumnSelection, wholeRowSelection } from "./selection";
+import { axisSelection, clampCell, containsCell, dragThresholdExceeded, moveSelection, selectionRange, wholeColumnSelection, wholeRowSelection } from "./selection";
 import { buildClearChanges } from "./clear";
 import { buildReplaceChanges, buildValueChanges, filteredRowIndexes, targetRowsForColumn } from "./batch";
 import { buildFillChanges, fillPreviewMap } from "./fill";
@@ -24,6 +24,7 @@ const MAX_CELLS = 5000;
 const MAX_NEW_ROWS = 200;
 const VIRTUALIZE_AFTER = 300;
 const VIRTUAL_BUFFER = 30;
+const AXIS_DRAG_THRESHOLD = 4;
 
 function selectedKeys(raw) {
   const parsed = safeJson(raw, raw);
@@ -161,6 +162,29 @@ function rowIndexAtPoint(event, container) {
   const rowHeight = Math.max(1, Number(first?.height || last?.height || 38));
   if (last && event.clientY > last.bottom) return lastRow + Math.max(1, Math.ceil((event.clientY - last.bottom) / rowHeight));
   if (first && event.clientY < first.top) return Math.max(0, firstRow - Math.ceil((first.top - event.clientY) / rowHeight));
+  return null;
+}
+
+function columnIndexAtPoint(event, container) {
+  const headers = [...(container?.querySelectorAll?.("th[data-grid-column]") || [])]
+    .map((header) => ({ header, bounds: header.getBoundingClientRect?.() }))
+    .filter(({ bounds }) => bounds);
+  if (!headers.length) return null;
+  const inside = headers.find(({ bounds }) => event.clientX >= bounds.left && event.clientX <= bounds.right);
+  if (inside) return Number(inside.header.dataset.gridColumn);
+  const sorted = headers.sort((a, b) => a.bounds.left - b.bounds.left);
+  if (event.clientX < sorted[0].bounds.left) return Number(sorted[0].header.dataset.gridColumn);
+  if (event.clientX > sorted[sorted.length - 1].bounds.right) return Number(sorted[sorted.length - 1].header.dataset.gridColumn);
+  return null;
+}
+
+function axisIndexAtPoint(event, axis, container) {
+  if (axis === "row") {
+    const marker = document.elementFromPoint(event.clientX, event.clientY)?.closest?.("td.row-marker[data-grid-row]");
+    if (marker) return Number(marker.dataset.gridRow);
+    return rowIndexAtPoint(event, container);
+  }
+  if (axis === "column") return columnIndexAtPoint(event, container);
   return null;
 }
 
@@ -315,6 +339,7 @@ export default function App() {
   const hydratedRef = useRef(false);
   const saveTimer = useRef(null);
   const draggingRef = useRef(false);
+  const axisDragRef = useRef(null);
   const fillDragRef = useRef(null);
   const columnResizeRef = useRef(null);
   const rowResizeRef = useRef(null);
@@ -367,6 +392,7 @@ export default function App() {
   const [diagnosticsOpen, setDiagnosticsOpen] = useState(false);
   const [diagnosticEntries, setDiagnosticEntries] = useState(() => diagnostics.list());
   const [virtualScrollTop, setVirtualScrollTop] = useState(0);
+  const [helpOpen, setHelpOpen] = useState(false);
   const hydratingRelationsRef = useRef(new Set());
 
   rowsRef.current = rows;
@@ -866,6 +892,40 @@ export default function App() {
     gridRef.current?.focus?.({ preventScroll: true });
   }, [adapters.length, cellSelection, rows.length]);
 
+  const beginAxisDrag = useCallback((event, axis, index) => {
+    if (event.button !== 0 || !Number.isFinite(index)) return;
+    const selection = axisSelection(axis, index, index, adapters.length, rows.length);
+    if (!selection) return;
+    event.preventDefault();
+    event.stopPropagation();
+    axisDragRef.current = {
+      axis,
+      anchorIndex: index,
+      focusIndex: index,
+      start: { x: event.clientX, y: event.clientY },
+      pointerId: event.pointerId,
+      lastCount: axis === "row" ? rows.length : adapters.length,
+      active: false
+    };
+    setEditingCell(null);
+    setCellSelection(selection);
+    gridRef.current?.focus?.({ preventScroll: true });
+    event.currentTarget.setPointerCapture?.(event.pointerId);
+  }, [adapters.length, rows.length]);
+
+  const updateAxisDragTarget = useCallback((event) => {
+    const drag = axisDragRef.current;
+    if (!drag?.active) return;
+    const targetIndex = axisIndexAtPoint(event, drag.axis, gridRef.current);
+    const currentCount = drag.axis === "row" ? rows.length : adapters.length;
+    if (!Number.isFinite(targetIndex) || (targetIndex === drag.focusIndex && currentCount === drag.lastCount)) return;
+    const selection = axisSelection(drag.axis, drag.anchorIndex, targetIndex, adapters.length, rows.length);
+    if (!selection) return;
+    drag.focusIndex = targetIndex;
+    drag.lastCount = currentCount;
+    setCellSelection(selection);
+  }, [adapters.length, rows.length]);
+
   const moveCellSelection = useCallback((column, row, extend = false) => {
     setCellSelection((current) => {
       const next = moveSelection(current, column, row, adapters.length, Math.max(1, rows.length), extend);
@@ -1193,6 +1253,10 @@ export default function App() {
     setResizing(null);
   }, []);
 
+  const finishAxisDrag = useCallback(() => {
+    axisDragRef.current = null;
+  }, []);
+
   const handleGridPointerMove = useCallback((event) => {
     if (columnResizeRef.current) {
       const resize = columnResizeRef.current;
@@ -1206,6 +1270,14 @@ export default function App() {
       setRowHeights((current) => current[resize.rowKey] === height ? current : { ...current, [resize.rowKey]: height });
       return;
     }
+    if (axisDragRef.current) {
+      const drag = axisDragRef.current;
+      if (!drag.active) {
+        if (!dragThresholdExceeded(drag.start, { x: event.clientX, y: event.clientY }, AXIS_DRAG_THRESHOLD)) return;
+        drag.active = true;
+      }
+      updateAxisDragTarget(event);
+    }
     if (fillDragRef.current) {
       const targetRow = rowIndexAtPoint(event, gridRef.current);
       if (targetRow !== null && Number.isFinite(targetRow)) {
@@ -1213,7 +1285,7 @@ export default function App() {
         setFillDrag((current) => current && current.targetRow === targetRow ? current : current ? { ...current, targetRow } : current);
       }
     }
-    if (!draggingRef.current && !fillDragRef.current) return;
+    if (!draggingRef.current && !fillDragRef.current && !axisDragRef.current?.active) return;
     if (draggingRef.current) {
       const cell = document.elementFromPoint(event.clientX, event.clientY)?.closest?.("td[data-grid-row]");
       if (cell) setCellSelection((current) => current ? { ...current, focus: { column: Number(cell.dataset.gridColumn), row: Number(cell.dataset.gridRow) } } : current);
@@ -1222,8 +1294,9 @@ export default function App() {
     if (!container) return;
     const bounds = container.getBoundingClientRect();
     const velocity = scrollVelocity(event.clientX, event.clientY, bounds);
-    autoScrollRef.current.x = velocity.x;
-    autoScrollRef.current.y = velocity.y;
+    const axis = axisDragRef.current?.active ? axisDragRef.current.axis : null;
+    autoScrollRef.current.x = axis === "row" ? 0 : velocity.x;
+    autoScrollRef.current.y = axis === "column" ? 0 : velocity.y;
     autoScrollRef.current.clientX = event.clientX;
     autoScrollRef.current.clientY = event.clientY;
     if (!velocity.x && !velocity.y) { stopAutoScroll(); return; }
@@ -1231,9 +1304,10 @@ export default function App() {
     const tick = () => {
       const state = autoScrollRef.current;
       const target = gridRef.current;
-      if (!target || (!draggingRef.current && !fillDragRef.current) || (!state.x && !state.y)) { stopAutoScroll(); return; }
+      if (!target || (!draggingRef.current && !fillDragRef.current && !axisDragRef.current?.active) || (!state.x && !state.y)) { stopAutoScroll(); return; }
       target.scrollLeft += state.x;
       target.scrollTop += state.y;
+      if (axisDragRef.current?.active) updateAxisDragTarget({ clientX: state.clientX, clientY: state.clientY });
       if (fillDragRef.current) {
         const targetRow = rowIndexAtPoint({ clientX: state.clientX, clientY: state.clientY }, target);
         if (targetRow !== null && Number.isFinite(targetRow) && targetRow !== fillDragRef.current.targetRow) {
@@ -1244,11 +1318,11 @@ export default function App() {
       state.frame = requestAnimationFrame(tick);
     };
     autoScrollRef.current.frame = requestAnimationFrame(tick);
-  }, [stopAutoScroll]);
+  }, [stopAutoScroll, updateAxisDragTarget]);
 
   useEffect(() => {
-    const stopDragging = () => { draggingRef.current = false; stopAutoScroll(); finishResize(); finishFillDrag(); };
-    const cancelDragging = () => { draggingRef.current = false; stopAutoScroll(); finishResize(); cancelFillDrag(); };
+    const stopDragging = () => { draggingRef.current = false; finishAxisDrag(); stopAutoScroll(); finishResize(); finishFillDrag(); };
+    const cancelDragging = () => { draggingRef.current = false; finishAxisDrag(); stopAutoScroll(); finishResize(); cancelFillDrag(); };
     window.addEventListener("pointermove", handleGridPointerMove);
     window.addEventListener("pointerup", stopDragging);
     window.addEventListener("pointercancel", cancelDragging);
@@ -1257,7 +1331,9 @@ export default function App() {
       window.removeEventListener("pointerup", stopDragging);
       window.removeEventListener("pointercancel", cancelDragging);
     };
-  }, [cancelFillDrag, finishFillDrag, finishResize, handleGridPointerMove, stopAutoScroll]);
+  }, [cancelFillDrag, finishAxisDrag, finishFillDrag, finishResize, handleGridPointerMove, stopAutoScroll]);
+
+  useEffect(() => () => finishAxisDrag(), [finishAxisDrag]);
 
   function addRow() {
     const draft = createDraftRow(allControls);
@@ -1402,6 +1478,12 @@ export default function App() {
   const pickerAdapter = picker ? adapters[picker.columnIndex] : null;
   const pickerRow = picker ? rows[picker.rowIndex] : null;
   const cellSelectionRange = selectionRange(cellSelection);
+  const selectionSummary = selectedRows.length
+    ? `已选择 ${selectedRows.length} 条记录`
+    : cellSelectionRange
+    ? `已选择 ${cellSelectionRange.width * cellSelectionRange.height} 个单元格`
+    : "";
+  const loadedSummary = `${total == null ? `已加载 ${loadedCount} 条` : `已加载 ${loadedCount} / 共 ${total} 条`}${hasMore ? " · 向下滚动继续加载" : " · 已全部加载"}${layoutStatus ? ` · ${layoutStatus}` : ""}`;
   const menuColumn = columnMenu ? columns.find((column) => column.id === columnMenu.fieldId) : null;
   const menuControl = columnMenu ? controls.find((control) => control.controlId === columnMenu.fieldId) : null;
   const menuAdapter = columnMenu ? adapters.find((adapter) => adapter.control.controlId === columnMenu.fieldId) : null;
@@ -1473,17 +1555,12 @@ export default function App() {
                       && cellSelectionRange.bottom === rows.length - 1
                       && columnIndex >= cellSelectionRange.left
                       && columnIndex <= cellSelectionRange.right;
-                    return <th key={column.id} className={[queryState.sortId === column.id || queryState.filterMap[column.id] ? "header-active" : "", selected && "header-selected"].filter(Boolean).join(" ")} style={{ width: column.width, minWidth: 0 }}>
+                    return <th key={column.id} data-grid-column={columnIndex} className={[queryState.sortId === column.id || queryState.filterMap[column.id] ? "header-active" : "", selected && "header-selected"].filter(Boolean).join(" ")} style={{ width: column.width, minWidth: 0 }}>
                     <button
                       type="button"
                       className="header-select-trigger"
                       aria-label={`选择${column.title}列`}
-                      onPointerDown={(event) => {
-                        if (event.button !== 0) return;
-                        event.preventDefault();
-                        event.stopPropagation();
-                        selectWholeColumn(columnIndex, event.shiftKey);
-                      }}
+                      onPointerDown={(event) => beginAxisDrag(event, "column", columnIndex)}
                       onKeyDown={(event) => {
                         if (event.key !== "Enter" && event.key !== " ") return;
                         event.preventDefault();
@@ -1511,7 +1588,16 @@ export default function App() {
                     && rowIndex >= cellSelectionRange.top
                     && rowIndex <= cellSelectionRange.bottom;
                   return <tr key={row.key} data-row-key={row.key} className={`row-${row.state}${row.conflict ? " row-conflict" : ""}`} style={{ height: rowHeight }} aria-hidden={previewRow || undefined}>
-                  <td className={["row-marker", rowContentSelected && "row-marker-selected", rowChecked && "row-marker-checked"].filter(Boolean).join(" ")} style={{ height: rowHeight }}>
+                  <td
+                    data-grid-row={rowIndex}
+                    className={["row-marker", rowContentSelected && "row-marker-selected", rowChecked && "row-marker-checked"].filter(Boolean).join(" ")}
+                    style={{ height: rowHeight }}
+                    onPointerDown={(event) => {
+                      if (previewRow || event.button !== 0) return;
+                      if (event.target.closest?.('input[type="checkbox"], .row-resize-handle')) return;
+                      beginAxisDrag(event, "row", rowIndex);
+                    }}
+                  >
                     {!previewRow && <input type="checkbox" aria-label={`选择第 ${rowIndex + 1} 行`} checked={rowChecked} onChange={(event) => setSelectedRows((current) => event.target.checked ? [...new Set([...current, row.key])] : current.filter((item) => item !== row.key))} />}
                     {previewRow
                       ? <span>{rowIndex + 1}</span>
@@ -1519,12 +1605,6 @@ export default function App() {
                           type="button"
                           className="row-select-trigger"
                           aria-label={`选择第 ${rowIndex + 1} 行内容`}
-                          onPointerDown={(event) => {
-                            if (event.button !== 0) return;
-                            event.preventDefault();
-                            event.stopPropagation();
-                            selectWholeRow(rowIndex, event.shiftKey);
-                          }}
                           onKeyDown={(event) => {
                             if (event.key !== "Enter" && event.key !== " ") return;
                             event.preventDefault();
@@ -1644,8 +1724,31 @@ export default function App() {
     </main>
 
     <footer className="table-footer">
-      <span>{total == null ? `已加载 ${loadedCount} 条` : `已加载 ${loadedCount} / 共 ${total} 条`}{hasMore ? " · 向下滚动继续加载" : " · 已全部加载"}{layoutStatus ? ` · ${layoutStatus}` : ""}</span>
-      <span>拖拽或 Shift 扩展选区 · 右下角填充柄上下拖拽复制 · Ctrl/Cmd+C/V 批量复制粘贴 · Ctrl/Cmd+Z 撤销 · Enter/F2 编辑</span>
+      <span className="table-footer-status" aria-live="polite">
+        {selectionSummary && <><span className="table-footer-selection">{selectionSummary}</span><span className="table-footer-divider"> · </span></>}
+        {loadedSummary}
+      </span>
+      <button
+        type="button"
+        className="table-help-trigger"
+        aria-label="打开使用说明"
+        aria-expanded={helpOpen}
+        title="使用说明"
+        onClick={() => setHelpOpen((current) => !current)}
+      >?</button>
+      {helpOpen && <>
+        <button type="button" className="popover-scrim" aria-label="关闭使用说明" onClick={() => setHelpOpen(false)} />
+        <div className="table-help-popover" role="dialog" aria-label="使用说明">
+          <div className="table-help-title">使用说明</div>
+          <ul>
+            <li>拖动行号或列标题可批量选择整行、整列</li>
+            <li>拖拽或按住 Shift 可扩展选区</li>
+            <li>右下角填充柄上下拖拽复制</li>
+            <li>Ctrl/Cmd+C、Ctrl/Cmd+V 批量复制粘贴</li>
+            <li>Ctrl/Cmd+Z 撤销，Enter/F2 编辑</li>
+          </ul>
+        </div>
+      </>}
     </footer>
 
     {columnMenu && menuColumn && menuControl && menuAdapter && <ColumnMenu

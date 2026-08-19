@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cellsInRange, containsCell, moveSelection, selectionRange, wholeColumnSelection, wholeRowSelection } from "./selection";
+import { axisSelection, cellsInRange, containsCell, dragThresholdExceeded, moveSelection, selectionRange, wholeColumnSelection, wholeRowSelection } from "./selection";
 
 describe("selection", () => {
   it("normalizes reverse drag ranges", () => {
@@ -26,5 +26,18 @@ describe("selection", () => {
     expect(wholeColumnSelection(99, 4, 5, -2)).toEqual({ anchor: { column: 0, row: 0 }, focus: { column: 3, row: 4 } });
     expect(wholeRowSelection(0, 0, 5)).toBeNull();
     expect(wholeColumnSelection(0, 4, 0)).toBeNull();
+  });
+
+  it("builds anchored axis selections for row and column drags", () => {
+    expect(selectionRange(axisSelection("row", 2, 6, 4, 10))).toEqual({ left: 0, right: 3, top: 2, bottom: 6, width: 4, height: 5 });
+    expect(selectionRange(axisSelection("column", 3, 1, 5, 8))).toEqual({ left: 1, right: 3, top: 0, bottom: 7, width: 3, height: 8 });
+    expect(axisSelection("diagonal", 0, 1, 4, 4)).toBeNull();
+  });
+
+  it("only activates axis dragging after the movement threshold", () => {
+    expect(dragThresholdExceeded({ x: 10, y: 10 }, { x: 13, y: 11 }, 4)).toBe(false);
+    expect(dragThresholdExceeded({ x: 10, y: 10 }, { x: 14, y: 10 }, 4)).toBe(true);
+    expect(dragThresholdExceeded({ x: 10, y: 10 }, { x: 10, y: 15 })).toBe(true);
+    expect(dragThresholdExceeded(null, { x: 10, y: 10 })).toBe(false);
   });
 });
