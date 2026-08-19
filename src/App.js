@@ -1504,9 +1504,15 @@ export default function App() {
                   const rowIndex = virtualWindow.start + visibleIndex;
                   const previewRow = row.state === "preview";
                   const rowHeight = rowHeightFor(row);
+                  const rowChecked = selectedRows.includes(row.key);
+                  const rowContentSelected = cellSelectionRange
+                    && cellSelectionRange.left === 0
+                    && cellSelectionRange.right === adapters.length - 1
+                    && rowIndex >= cellSelectionRange.top
+                    && rowIndex <= cellSelectionRange.bottom;
                   return <tr key={row.key} data-row-key={row.key} className={`row-${row.state}${row.conflict ? " row-conflict" : ""}`} style={{ height: rowHeight }} aria-hidden={previewRow || undefined}>
-                  <td className={["row-marker", cellSelectionRange && cellSelectionRange.left === 0 && cellSelectionRange.right === adapters.length - 1 && rowIndex >= cellSelectionRange.top && rowIndex <= cellSelectionRange.bottom ? "row-marker-selected" : ""].filter(Boolean).join(" ")} style={{ height: rowHeight }}>
-                    {!previewRow && <input type="checkbox" aria-label={`选择第 ${rowIndex + 1} 行`} checked={selectedRows.includes(row.key)} onChange={(event) => setSelectedRows((current) => event.target.checked ? [...new Set([...current, row.key])] : current.filter((item) => item !== row.key))} />}
+                  <td className={["row-marker", rowContentSelected && "row-marker-selected", rowChecked && "row-marker-checked"].filter(Boolean).join(" ")} style={{ height: rowHeight }}>
+                    {!previewRow && <input type="checkbox" aria-label={`选择第 ${rowIndex + 1} 行`} checked={rowChecked} onChange={(event) => setSelectedRows((current) => event.target.checked ? [...new Set([...current, row.key])] : current.filter((item) => item !== row.key))} />}
                     {previewRow
                       ? <span>{rowIndex + 1}</span>
                       : <button
