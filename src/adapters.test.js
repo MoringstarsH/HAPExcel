@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { attachmentItems, createFieldAdapter, entityItems, getFieldKind, locationValue, memberPresentations, numberPresentation, numberPresentationText, optionPresentation, relationLinks, richTextSummary } from "./adapters";
+import { attachmentItems, createFieldAdapter, entityItems, getFieldKind, locationValue, memberPresentations, mergeCanonicalControlOptions, numberPresentation, numberPresentationText, optionPresentation, relationLinks, richTextSummary } from "./adapters";
 
 const options = [{ key: "a", value: "待处理", color: "#34c759" }, { key: "b", value: "已完成", color: "#f04438" }];
 
@@ -28,11 +28,36 @@ describe("field adapters", () => {
       expect.objectContaining({ color: expect.any(String), colored: true })
     );
     expect(optionPresentation({ type: 9, options }, "missing")).toEqual(
-      expect.objectContaining({ label: "missing", color: null, colored: false })
+      expect.objectContaining({ label: "", color: null, colored: false })
     );
     expect(optionPresentation({ type: 9, colorful: false, options }, "a")).toEqual(
       expect.objectContaining({ label: "待处理", color: null, colored: false })
     );
+  });
+  it("uses only options from the canonical HAP control metadata", () => {
+    const configured = [{ controlId: "tax", type: 9, options: [
+      { key: "a", value: "13%" },
+      { key: "b", value: "6%" },
+      { key: "c", value: "选项3" }
+    ]}];
+    const canonical = [{ controlId: "tax", type: 9, options: [{ key: "a", value: "13%" }] }];
+    expect(mergeCanonicalControlOptions(configured, canonical)[0].options).toEqual([{ key: "a", value: "13%" }]);
+    expect(createFieldAdapter(mergeCanonicalControlOptions(configured, canonical)[0]).optionTags(["a", "b"])).toHaveLength(1);
+  });
+  it("does not expose HAP options marked as deleted", () => {
+    const adapter = createFieldAdapter({ type: 11, options: [
+      { key: "unit", value: "吨", isDeleted: false },
+      { key: "deleted-2", value: "选项2", isDeleted: true },
+      { key: "deleted-3", value: "选项3", isDeleted: "true" }
+    ] });
+    expect(adapter.options.map((option) => option.value)).toEqual(["吨"]);
+    expect(adapter.optionTags(["unit", "deleted-2", "deleted-3"]).map((tag) => tag.label)).toEqual(["吨"]);
+    expect(adapter.validate(["deleted-2"])).toContain("不存在的选项");
+  });
+  it("rejects select values whose keys are not in HAP options", () => {
+    const adapter = createFieldAdapter({ type: 10, options: [{ key: "a", value: "选择1" }] });
+    expect(adapter.validate(["a"])).toBeNull();
+    expect(adapter.validate(["b"])).toContain("不存在的选项");
   });
   it("uses clear semantics for checkboxes and numbers", () => {
     expect(createFieldAdapter({ type: 36 }).parseEditor("是").value).toBe(true);

@@ -3,14 +3,16 @@ import { describe, expect, it, vi } from "vitest";
 const mocks = vi.hoisted(() => ({
   saveWorksheetView: vi.fn(),
   getRowDetail: vi.fn(),
+  getWorksheetInfo: vi.fn(),
+  getWorksheetControls: vi.fn(),
   selectDepartments: vi.fn(),
   selectOrgRole: vi.fn(),
   selectLocation: vi.fn(),
   openRecordInfo: vi.fn()
 }));
 vi.mock("mdye", () => ({
-  api: { getRowDetail: mocks.getRowDetail },
-  apis: { worksheet: { saveWorksheetView: mocks.saveWorksheetView } },
+  api: { getRowDetail: mocks.getRowDetail, getWorksheetInfo: mocks.getWorksheetInfo },
+  apis: { worksheet: { saveWorksheetView: mocks.saveWorksheetView, getWorksheetControls: mocks.getWorksheetControls } },
   md_emitter: {},
   utils: { selectDepartments: mocks.selectDepartments, selectOrgRole: mocks.selectOrgRole, selectLocation: mocks.selectLocation, openRecordInfo: mocks.openRecordInfo }
 }));
@@ -86,6 +88,26 @@ describe("relation record normalization", () => {
       advancedSetting: expect.objectContaining({ hapExcelLayout: expect.any(String) })
     }));
     expect(JSON.parse(mocks.saveWorksheetView.mock.calls.at(-1)[0].advancedSetting.hapExcelLayout).columnWidths.name).toBe(240);
+  });
+  it("loads canonical worksheet controls before using view options", async () => {
+    mocks.getWorksheetControls.mockResolvedValueOnce({ data: { controls: [
+      { controlId: "6a70c1a07737f22ffe796b11", type: 11, options: [{ key: "unit", value: "吨" }] }
+    ] } });
+    const gateway = createGateway({
+      appId: "app",
+      worksheetId: "sheet",
+      viewId: "view",
+      worksheetInfo: { controls: [{ controlId: "6a70c1a07737f22ffe796b11", type: 11, options: [{ key: "fake", value: "选项2" }] }] }
+    });
+
+    await expect(gateway.loadWorksheetControls()).resolves.toEqual([expect.objectContaining({
+      controlId: "6a70c1a07737f22ffe796b11",
+      options: [{ key: "unit", value: "吨" }]
+    })]);
+    expect(mocks.getWorksheetControls).toHaveBeenCalledWith(expect.objectContaining({
+      worksheetId: "sheet",
+      resultType: 3
+    }));
   });
   it("wraps public HAP selectors and record refresh APIs", async () => {
     mocks.selectDepartments.mockResolvedValueOnce([{ departmentId: "d1" }]);

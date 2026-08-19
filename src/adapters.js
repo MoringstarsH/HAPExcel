@@ -10,6 +10,7 @@ const CURRENCY_SYMBOL_BY_CODE = {
   PHP: "₱", ILS: "₪", LAK: "₭", PYG: "₲", CRC: "₡", GHS: "₵", HKD: "HK$",
   MOP: "MOP$", TWD: "NT$", SGD: "S$", AUD: "A$", CAD: "C$"
 };
+const OPTION_TYPES = new Set([9, 10, 11]);
 
 export function safeJson(value, fallback = value) {
   if (typeof value !== "string") return value;
@@ -45,7 +46,36 @@ export function getFieldKind(control = {}, rawValue) {
   return "readonly";
 }
 
-function optionsOf(control) { return Array.isArray(control.options) ? control.options : []; }
+function parsedOptions(value) {
+  const parsed = safeJson(value, value);
+  return Array.isArray(parsed) ? parsed : [];
+}
+
+function isDeletedOption(option) {
+  return [true, 1, "1", "true"].includes(option?.isDeleted);
+}
+
+function normalizeOptions(value) {
+  return parsedOptions(value).filter((option) => {
+    if (!option || typeof option !== "object") return false;
+    if (isDeletedOption(option)) return false;
+    return option.key !== undefined && option.key !== null && String(option.key).trim() !== ""
+      && optionLabel(option).trim() !== "";
+  });
+}
+
+function optionsOf(control) { return normalizeOptions(control?.options); }
+
+export function mergeCanonicalControlOptions(controls = [], canonicalControls = []) {
+  if (!Array.isArray(canonicalControls) || !canonicalControls.length) return controls;
+  const canonicalById = new Map(canonicalControls.map((control) => [control?.controlId, control]));
+  return controls.map((control) => {
+    if (!OPTION_TYPES.has(Number(control?.type))) return control;
+    const canonical = canonicalById.get(control?.controlId);
+    if (!canonical || !Object.prototype.hasOwnProperty.call(canonical, "options")) return control;
+    return { ...control, options: normalizeOptions(canonical.options) };
+  });
+}
 
 function optionLabel(option) { return String(option?.value ?? option?.name ?? option?.key ?? ""); }
 
@@ -79,7 +109,7 @@ export function optionPresentation(control, key) {
   const colored = known && optionColorEnabled(control);
   return {
     key: String(key ?? ""),
-    label: known ? optionLabel(option) : String(key ?? ""),
+    label: known ? optionLabel(option) : "",
     color: colored ? normalizeOptionColor(colorValueOf(option), optionIndex) : null,
     colored
   };
@@ -358,7 +388,9 @@ export function valueLabels(control, raw) {
 }
 
 function optionTags(control, raw) {
-  return keysFrom(raw).map((key) => optionPresentation(control, key));
+  return keysFrom(raw)
+    .map((key) => optionPresentation(control, key))
+    .filter((option) => option.label);
 }
 
 function parseInput(input, control) {
@@ -421,6 +453,10 @@ function validateValue(value, control, required = Boolean(control.required)) {
     const keys = keysFrom(value);
     if (!keys.length) return "选项值格式无效，请重新选择";
     if (keys.some((key) => !["string", "number"].includes(typeof key) || String(key).trim() === "")) return "选项值格式无效，请重新选择";
+    if (Object.prototype.hasOwnProperty.call(control, "options")) {
+      const knownKeys = new Set(optionsOf(control).map((option) => String(option.key)));
+      if (keys.some((key) => !knownKeys.has(String(key)))) return "包含当前字段中不存在的选项，请重新选择";
+    }
   }
   if (kind === "member") {
     const items = memberItems(value);
@@ -512,5 +548,5 @@ export function getControls(runtimeConfig) {
 }
 
 export function structureHash(controls) {
-  return JSON.stringify((controls || []).map((control) => [control.controlId, control.type, control.controlName, control.required, control.enumDefault, control.subType, (control.options || []).map((option) => [option.key, option.value])]));
+  return JSON.stringify((controls || []).map((control) => [control.controlId, control.type, control.controlName, control.required, control.enumDefault, control.subType, optionsOf(control).map((option) => [option.key, option.value])]));
 }

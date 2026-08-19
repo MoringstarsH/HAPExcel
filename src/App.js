@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { config, env } from "mdye";
-import { createFieldAdapter, getControls, safeJson } from "./adapters";
+import { createFieldAdapter, getControls, mergeCanonicalControlOptions, safeJson } from "./adapters";
 import { buildPasteChanges, createClipboardPayload, GRID_CLIPBOARD_TYPE, readClipboardMatrix } from "./clipboard";
 import { hiddenErrorFieldNames, resolveVisibleControls } from "./columns";
 import { applyCommitResult, commitRows, commitSummary, normalizeOptionalFieldErrors, validateRows } from "./commit";
@@ -317,7 +317,10 @@ function MemberTags({ tags }) {
 
 export default function App() {
   const runtimeConfig = config || {};
-  const allControls = useMemo(() => getControls(runtimeConfig), [runtimeConfig]);
+  const gateway = useMemo(() => createGateway(runtimeConfig), [runtimeConfig.appId, runtimeConfig.projectId, runtimeConfig.worksheetId, runtimeConfig.viewId]);
+  const [canonicalControls, setCanonicalControls] = useState(null);
+  const configuredControls = useMemo(() => getControls(runtimeConfig), [runtimeConfig]);
+  const allControls = useMemo(() => mergeCanonicalControlOptions(configuredControls, canonicalControls || []), [canonicalControls, configuredControls]);
   const columnConfig = useMemo(() => resolveVisibleControls({
     controls: allControls,
     view: runtimeConfig.view,
@@ -326,7 +329,6 @@ export default function App() {
   const controls = columnConfig.controls;
   const allAdapters = useMemo(() => allControls.map(createFieldAdapter), [allControls]);
   const adapters = useMemo(() => controls.map(createFieldAdapter), [controls]);
-  const gateway = useMemo(() => createGateway(runtimeConfig), [runtimeConfig.appId, runtimeConfig.projectId, runtimeConfig.worksheetId, runtimeConfig.viewId]);
   const gridRef = useRef(null);
   const pageRef = useRef(1);
   const requestRef = useRef(0);
@@ -394,6 +396,17 @@ export default function App() {
   const [virtualScrollTop, setVirtualScrollTop] = useState(0);
   const [helpOpen, setHelpOpen] = useState(false);
   const hydratingRelationsRef = useRef(new Set());
+
+  useEffect(() => {
+    let active = true;
+    gateway.loadWorksheetControls()
+      .then((controls) => { if (active) setCanonicalControls(Array.isArray(controls) ? controls : []); })
+      .catch((error) => {
+        diagnostics.error("load.worksheetControls", error);
+        if (active) setCanonicalControls([]);
+      });
+    return () => { active = false; };
+  }, [gateway]);
 
   rowsRef.current = rows;
   hydratedRef.current = hydrated;
@@ -654,7 +667,10 @@ export default function App() {
     }
   }, [allControls, gateway, hasMore, loadState, rows, total]);
 
-  useEffect(() => { reloadWithQuery({}); }, [reloadWithQuery]);
+  useEffect(() => {
+    if (canonicalControls === null) return;
+    reloadWithQuery({});
+  }, [canonicalControls, reloadWithQuery]);
   useEffect(() => gateway.on("filters-update", (filters) => {
     reloadWithQuery(filters || {}, queryRef.current);
   }), [gateway, reloadWithQuery]);

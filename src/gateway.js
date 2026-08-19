@@ -5,7 +5,8 @@ import { diagnostics } from "./diagnostics";
 const worksheetMetaCache = new Map();
 
 function controlsOf(response) {
-  return response?.template?.controls || response?.data?.template?.controls || response?.controls || response?.data?.controls || [];
+  if (Array.isArray(response)) return response;
+  return response?.template?.controls || response?.data?.template?.controls || response?.controls || response?.data?.controls || (Array.isArray(response?.data) ? response.data : []);
 }
 
 function titleText(value) {
@@ -101,8 +102,9 @@ export async function withRetry(task, { attempts = 3, delay = 200 } = {}) {
   throw lastError;
 }
 
-export function createGateway({ appId, worksheetId, viewId, projectId }) {
+export function createGateway({ appId, worksheetId, viewId, projectId, worksheetInfo }) {
   const relationRecordCache = new Map();
+  const inlineWorksheetControls = controlsOf(worksheetInfo);
   async function relationMetadata(control) {
     const targetWorksheetId = control?.dataSource || worksheetId;
     const inlineControls = Array.isArray(control?.relationControls) ? control.relationControls : [];
@@ -122,6 +124,37 @@ export function createGateway({ appId, worksheetId, viewId, projectId }) {
   }
 
   return {
+    async loadWorksheetControls() {
+      const controlParams = {
+        appId,
+        worksheetId,
+        relationWorksheetId: "",
+        getTemplate: true,
+        getViews: false,
+        handleDefault: false,
+        worksheetIds: [],
+        handControlSource: false,
+        getRules: false,
+        getSwitchPermit: false,
+        getRelationSearch: false,
+        resultType: 3
+      };
+      let lastError;
+      for (const load of [
+        () => apis.worksheet?.getWorksheetControls?.(controlParams),
+        () => api.getWorksheetInfo({ appId, worksheetId, getTemplate: true })
+      ]) {
+        if (typeof load !== "function") continue;
+        try {
+          const response = await withRetry(load);
+          if (isBusinessFailure(response)) throw new Error(responseMessage(response));
+          const controls = controlsOf(response);
+          if (controls.length) return controls;
+        } catch (error) { lastError = error; }
+      }
+      if (lastError) throw lastError;
+      return inlineWorksheetControls;
+    },
     async loadPage({ pageIndex = 1, pageSize = 100, filters } = {}) {
       const startedAt = globalThis.performance?.now?.() || Date.now();
       try {
