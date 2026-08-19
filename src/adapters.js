@@ -70,10 +70,34 @@ export function mergeCanonicalControlOptions(controls = [], canonicalControls = 
   if (!Array.isArray(canonicalControls) || !canonicalControls.length) return controls;
   const canonicalById = new Map(canonicalControls.map((control) => [control?.controlId, control]));
   return controls.map((control) => {
-    if (!OPTION_TYPES.has(Number(control?.type))) return control;
     const canonical = canonicalById.get(control?.controlId);
-    if (!canonical || !Object.prototype.hasOwnProperty.call(canonical, "options")) return control;
-    return { ...control, options: normalizeOptions(canonical.options) };
+    if (!canonical) return control;
+    const configuredAdvancedRaw = safeJson(control?.advancedSetting, {});
+    const canonicalAdvancedRaw = safeJson(canonical?.advancedSetting, {});
+    const configuredAdvanced = configuredAdvancedRaw && typeof configuredAdvancedRaw === "object" ? configuredAdvancedRaw : {};
+    const canonicalAdvanced = canonicalAdvancedRaw && typeof canonicalAdvancedRaw === "object" ? canonicalAdvancedRaw : {};
+    const advancedSetting = configuredAdvanced && typeof configuredAdvanced === "object"
+      ? {
+        ...canonicalAdvanced,
+        ...configuredAdvanced,
+        ...((canonicalAdvanced.defsource && !configuredAdvanced.defsource) ? { defsource: canonicalAdvanced.defsource } : {}),
+        ...((canonicalAdvanced.defSource && !configuredAdvanced.defSource) ? { defSource: canonicalAdvanced.defSource } : {})
+      }
+      : canonicalAdvanced;
+    const merged = {
+      ...control,
+      ...(advancedSetting && Object.keys(advancedSetting).length ? { advancedSetting } : {}),
+      ...(!Object.prototype.hasOwnProperty.call(control, "defaultValue") && Object.prototype.hasOwnProperty.call(canonical, "defaultValue")
+        ? { defaultValue: canonical.defaultValue }
+        : {}),
+      ...(!Object.prototype.hasOwnProperty.call(control, "value") && Object.prototype.hasOwnProperty.call(canonical, "value")
+        ? { value: canonical.value }
+        : {})
+    };
+    if (OPTION_TYPES.has(Number(control?.type)) && Object.prototype.hasOwnProperty.call(canonical, "options")) {
+      merged.options = normalizeOptions(canonical.options);
+    }
+    return merged;
   });
 }
 

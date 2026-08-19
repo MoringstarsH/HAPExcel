@@ -91,7 +91,13 @@ describe("relation record normalization", () => {
   });
   it("loads canonical worksheet controls before using view options", async () => {
     mocks.getWorksheetControls.mockResolvedValueOnce({ data: { controls: [
-      { controlId: "6a70c1a07737f22ffe796b11", type: 11, options: [{ key: "unit", value: "吨" }] }
+      {
+        controlId: "6a70c1a07737f22ffe796b11",
+        type: 11,
+        value: ["unit"],
+        advancedSetting: { defsource: JSON.stringify([{ cid: "", rcid: "", staticValue: "unit" }]) },
+        options: [{ key: "unit", value: "吨", checked: true }]
+      }
     ] } });
     const gateway = createGateway({
       appId: "app",
@@ -102,10 +108,29 @@ describe("relation record normalization", () => {
 
     await expect(gateway.loadWorksheetControls()).resolves.toEqual([expect.objectContaining({
       controlId: "6a70c1a07737f22ffe796b11",
-      options: [{ key: "unit", value: "吨" }]
+      options: [expect.objectContaining({ key: "unit", value: "吨", checked: true })]
     })]);
     expect(mocks.getWorksheetControls).toHaveBeenCalledWith(expect.objectContaining({
       worksheetId: "sheet",
+      resultType: 3,
+      handleDefault: true
+    }));
+  });
+
+  it("uses the default-enabled worksheet info fallback", async () => {
+    mocks.getWorksheetControls.mockResolvedValueOnce({ data: { controls: [] } });
+    mocks.getWorksheetInfo.mockResolvedValueOnce({ data: { controls: [
+      { controlId: "6a70cb1def20820084f36672", type: 11, value: ["tax"], options: [{ key: "tax", value: "13%", checked: true }] }
+    ] } });
+    const gateway = createGateway({ appId: "app", worksheetId: "sheet", viewId: "view" });
+
+    await expect(gateway.loadWorksheetControls()).resolves.toEqual([expect.objectContaining({
+      controlId: "6a70cb1def20820084f36672",
+      value: ["tax"]
+    })]);
+    expect(mocks.getWorksheetInfo).toHaveBeenCalledWith(expect.objectContaining({
+      worksheetId: "sheet",
+      handleDefault: true,
       resultType: 3
     }));
   });

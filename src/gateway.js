@@ -64,6 +64,33 @@ function responseRowId(response) {
   return data.rowid || data.rowId || data.id || null;
 }
 
+function parsedObject(value) {
+  if (value && typeof value === "object") return value;
+  if (typeof value !== "string") return {};
+  try {
+    const parsed = JSON.parse(value);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_) { return {}; }
+}
+
+function defaultMetadata(control = {}) {
+  const advanced = parsedObject(control.advancedSetting);
+  const definitions = typeof advanced.defsource === "string" ? parsedObject(advanced.defsource) : advanced.defsource;
+  const hasDefsource = Array.isArray(definitions) && definitions.length > 0;
+  const checkedOptions = Array.isArray(control.options)
+    ? control.options.filter((option) => [true, 1, "1", "true"].includes(option?.checked)).length
+    : 0;
+  const hasResolvedValue = Object.prototype.hasOwnProperty.call(control, "value");
+  return {
+    controlId: control.controlId,
+    type: control.type,
+    source: hasResolvedValue ? "resolved-value" : hasDefsource ? "defsource" : checkedOptions ? "options.checked" : "none",
+    valueType: hasResolvedValue ? (Array.isArray(control.value) ? "array" : typeof control.value) : "none",
+    hasDefsource,
+    checkedOptions
+  };
+}
+
 function mutationFieldShapes(values = []) {
   return values.map((field) => {
     let valueType = Array.isArray(field?.value) ? "array" : typeof field?.value;
@@ -131,7 +158,7 @@ export function createGateway({ appId, worksheetId, viewId, projectId, worksheet
         relationWorksheetId: "",
         getTemplate: true,
         getViews: false,
-        handleDefault: false,
+        handleDefault: true,
         worksheetIds: [],
         handControlSource: false,
         getRules: false,
@@ -142,14 +169,17 @@ export function createGateway({ appId, worksheetId, viewId, projectId, worksheet
       let lastError;
       for (const load of [
         () => apis.worksheet?.getWorksheetControls?.(controlParams),
-        () => api.getWorksheetInfo({ appId, worksheetId, getTemplate: true })
+        () => api.getWorksheetInfo(controlParams)
       ]) {
         if (typeof load !== "function") continue;
         try {
           const response = await withRetry(load);
           if (isBusinessFailure(response)) throw new Error(responseMessage(response));
           const controls = controlsOf(response);
-          if (controls.length) return controls;
+          if (controls.length) {
+            diagnostics.info("api.loadWorksheetControls.defaults", { controls: controls.map(defaultMetadata) });
+            return controls;
+          }
         } catch (error) { lastError = error; }
       }
       if (lastError) throw lastError;

@@ -44,6 +44,29 @@ describe("field adapters", () => {
     expect(mergeCanonicalControlOptions(configured, canonical)[0].options).toEqual([{ key: "a", value: "13%" }]);
     expect(createFieldAdapter(mergeCanonicalControlOptions(configured, canonical)[0]).optionTags(["a", "b"])).toHaveLength(1);
   });
+
+  it("keeps canonical default definitions when view controls omit them", () => {
+    const configured = [{ controlId: "unit", type: 11, options: [{ key: "unit", value: "吨" }], advancedSetting: { defsource: "" } }];
+    const canonical = [{
+      controlId: "unit",
+      type: 11,
+      options: [{ key: "unit", value: "吨", checked: true }],
+      advancedSetting: JSON.stringify({ defsource: JSON.stringify([{ cid: "unit", staticValue: "吨" }]) })
+    }];
+    const merged = mergeCanonicalControlOptions(configured, canonical)[0];
+    expect(merged.options[0].checked).toBe(true);
+    expect(JSON.parse(merged.advancedSetting.defsource)[0].staticValue).toBe("吨");
+  });
+  it("keeps HAP-resolved canonical default values when view controls omit them", () => {
+    const configured = [{ controlId: "today", type: 15 }];
+    const canonical = [{
+      controlId: "today",
+      type: 15,
+      value: "2026-08-19",
+      advancedSetting: { defsource: [{ cid: "", staticValue: "2", time: "current" }] }
+    }];
+    expect(mergeCanonicalControlOptions(configured, canonical)[0]).toEqual(expect.objectContaining({ value: "2026-08-19" }));
+  });
   it("does not expose HAP options marked as deleted", () => {
     const adapter = createFieldAdapter({ type: 11, options: [
       { key: "unit", value: "吨", isDeleted: false },

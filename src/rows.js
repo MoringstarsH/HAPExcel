@@ -12,6 +12,149 @@ export function valuesFrom(record, columns) {
   return Object.fromEntries(columns.map((column) => [column.controlId, record?.[column.controlId] ?? ""]));
 }
 
+function advancedSettingOf(control = {}) {
+  const raw = control.advancedSetting;
+  if (!raw) return {};
+  if (typeof raw === "object") return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch (_) { return {}; }
+}
+
+function copyValue(value) {
+  if (value === null || value === undefined || typeof value !== "object") return value;
+  if (typeof globalThis.structuredClone === "function") {
+    try { return globalThis.structuredClone(value); } catch (_) { /* use recursive fallback */ }
+  }
+  if (Array.isArray(value)) return value.map(copyValue);
+  return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, copyValue(item)]));
+}
+
+function parseDefaultValue(value) {
+  if (typeof value !== "string") return value;
+  const text = value.trim();
+  if (!text) return value;
+  if (!/^[\[{]/.test(text)) return value;
+  try { return JSON.parse(text); } catch (_) { return value; }
+}
+
+function isChecked(value) {
+  return [true, 1, "1", "true"].includes(value);
+}
+
+function optionsOf(control = {}) {
+  const options = parseDefaultValue(control.options);
+  return Array.isArray(options) ? options.filter((option) => option && ![true, 1, "1", "true"].includes(option.isDeleted)) : [];
+}
+
+function optionKeyForValue(control, value) {
+  const candidate = value && typeof value === "object"
+    ? value.key ?? value.id ?? value.value ?? value.name
+    : value;
+  const option = optionsOf(control).find((item) => String(item.key) === String(candidate) || String(item.value ?? item.name ?? "") === String(candidate));
+  return option?.key ?? candidate;
+}
+
+function unwrapConfiguredDefault(value) {
+  const parsed = parseDefaultValue(value);
+  if (parsed && typeof parsed === "object" && !Array.isArray(parsed) && Object.prototype.hasOwnProperty.call(parsed, "value")) {
+    return parsed.value;
+  }
+  if (Array.isArray(parsed) && parsed.length && parsed.every((item) => item && typeof item === "object" && Object.prototype.hasOwnProperty.call(item, "value"))) {
+    const configured = parsed.find((item) => !item.source || String(item.source).toLowerCase() === "static") || parsed[0];
+    return configured.value;
+  }
+  return parsed;
+}
+
+function normalizeDefaultValue(control, value) {
+  const parsed = unwrapConfiguredDefault(value);
+  if (![9, 10, 11].includes(Number(control.type))) return parsed;
+  const values = Array.isArray(parsed) ? parsed : [parsed];
+  return values
+    .map((item) => optionKeyForValue(control, item))
+    .filter((item) => item !== undefined && item !== null && String(item) !== "");
+}
+
+function definitionsOf(advanced = {}) {
+  const definitions = parseDefaultValue(advanced.defsource ?? advanced.defSource);
+  return Array.isArray(definitions) ? definitions : [];
+}
+
+function hasCheckedOption(control) {
+  return optionsOf(control).some((option) => isChecked(option.checked));
+}
+
+function hasDefaultDefinition(control, advanced) {
+  const direct = [control.defaultValue, control.defaultvalue, control.default, advanced.defaultValue, advanced.defaultvalue, advanced.default];
+  return direct.some((value) => value !== undefined && value !== null)
+    || definitionsOf(advanced).length > 0
+    || hasCheckedOption(control);
+}
+
+function isDynamicDefaultValue(value) {
+  const parsed = parseDefaultValue(value);
+  if (typeof parsed === "string") return ["user-self", "user-departments", "user-role"].includes(parsed);
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return false;
+  return Object.values(parsed).some((item) => ["user-self", "user-departments", "user-role"].includes(item));
+}
+
+function staticDefaultFromDefinition(control, advanced) {
+  const definitions = definitionsOf(advanced);
+  if (!definitions.length) return { hasDefault: false, value: undefined };
+  const definition = definitions.find((item) => {
+    if (!item || typeof item !== "object") return false;
+    const fieldId = item.cid ?? item.controlId ?? item.fieldId;
+    return !fieldId || String(fieldId) === String(control.controlId);
+  });
+  if (!definition) return { hasDefault: false, value: undefined };
+  const source = String(definition.source ?? definition.sourceType ?? "static").toLowerCase();
+  if (source && !["static", "value", "1"].includes(source) && definition.staticValue === undefined) {
+    return { hasDefault: false, value: undefined };
+  }
+  const value = definition.staticValue ?? definition.value;
+  if (value === undefined || value === null) return { hasDefault: false, value: undefined };
+  if (definition.time === "current" || isChecked(definition.isAsync) || isDynamicDefaultValue(value)) return { hasDefault: false, value: undefined };
+  return { hasDefault: true, value: normalizeDefaultValue(control, value) };
+}
+
+function checkedOptionDefault(control) {
+  if (![9, 10, 11].includes(Number(control.type))) return { hasDefault: false, value: undefined };
+  const checked = optionsOf(control).filter((option) => isChecked(option.checked));
+  if (!checked.length) return { hasDefault: false, value: undefined };
+  return { hasDefault: true, value: checked.map((option) => option.key) };
+}
+
+/**
+ * HAP has returned field defaults in more than one shape over time. Keep the
+ * lookup tolerant, while deliberately not treating enumDefault as a value:
+ * that property controls selection cardinality for option/entity fields.
+ */
+export function defaultValueForControl(control = {}) {
+  const advanced = advancedSettingOf(control);
+  if (Object.prototype.hasOwnProperty.call(control, "value") && hasDefaultDefinition(control, advanced)) {
+    return { hasDefault: true, value: copyValue(normalizeDefaultValue(control, control.value)) };
+  }
+  const candidates = [
+    control.defaultValue,
+    control.defaultvalue,
+    control.default,
+    advanced.defaultValue,
+    advanced.defaultvalue,
+    advanced.default
+  ];
+  // HAP includes `default: ""` on ordinary controls. Treat that transport
+  // placeholder as absent so defsource/options can still supply the default.
+  const value = candidates.find((candidate) => candidate !== undefined && candidate !== null && candidate !== "");
+  if (value !== undefined) return { hasDefault: true, value: copyValue(normalizeDefaultValue(control, value)) };
+  const staticDefault = staticDefaultFromDefinition(control, advanced);
+  if (staticDefault.hasDefault) return { hasDefault: true, value: copyValue(staticDefault.value) };
+  const checkedDefault = checkedOptionDefault(control);
+  if (checkedDefault.hasDefault) return checkedDefault;
+  return { hasDefault: false, value: undefined };
+}
+
 export function createServerRow(record, columns) {
   const rowId = rowIdOf(record);
   return {
@@ -28,12 +171,19 @@ export function createServerRow(record, columns) {
 
 export function createDraftRow(columns) {
   const key = temporaryId();
+  const values = {};
+  const dirtyFields = [];
+  columns.forEach((column) => {
+    const defaultValue = defaultValueForControl(column);
+    values[column.controlId] = defaultValue.hasDefault ? defaultValue.value : "";
+    if (defaultValue.hasDefault) dirtyFields.push(column.controlId);
+  });
   return {
     key,
     rowId: null,
     serverSnapshot: {},
-    values: valuesFrom({}, columns),
-    dirtyFields: [],
+    values,
+    dirtyFields,
     cellErrors: {},
     state: "new",
     saveError: ""
