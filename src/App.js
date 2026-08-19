@@ -8,7 +8,7 @@ import { clearDrafts, loadDrafts, saveDrafts } from "./drafts";
 import { createGateway, rowIdOf } from "./gateway";
 import { canRedo, canUndo, createHistoryState, historyReducer } from "./history";
 import { createDraftRow, createServerRow, editRow, hasPendingChange, markDeleted, mergeQueriedRows, mergeRestoredDrafts, mergeServerPage, rebaseRowFromServer, restoreDeleted } from "./rows";
-import { clampCell, containsCell, moveSelection, selectionRange } from "./selection";
+import { clampCell, containsCell, moveSelection, selectionRange, wholeColumnSelection, wholeRowSelection } from "./selection";
 import { buildClearChanges } from "./clear";
 import { buildReplaceChanges, buildValueChanges, filteredRowIndexes, targetRowsForColumn } from "./batch";
 import { buildFillChanges, fillPreviewMap } from "./fill";
@@ -844,6 +844,28 @@ export default function App() {
     });
   }, []);
 
+  const selectWholeRow = useCallback((rowIndex, extend = false) => {
+    if (!rows.length || !adapters.length) return;
+    const currentRange = selectionRange(cellSelection);
+    const canExtend = extend && currentRange && currentRange.left === 0 && currentRange.right === adapters.length - 1;
+    const selection = wholeRowSelection(rowIndex, adapters.length, rows.length, canExtend ? cellSelection.anchor.row : rowIndex);
+    if (!selection) return;
+    setEditingCell(null);
+    setCellSelection(selection);
+    gridRef.current?.focus?.({ preventScroll: true });
+  }, [adapters.length, cellSelection, rows.length]);
+
+  const selectWholeColumn = useCallback((columnIndex, extend = false) => {
+    if (!rows.length || !adapters.length) return;
+    const currentRange = selectionRange(cellSelection);
+    const canExtend = extend && currentRange && currentRange.top === 0 && currentRange.bottom === rows.length - 1;
+    const selection = wholeColumnSelection(columnIndex, adapters.length, rows.length, canExtend ? cellSelection.anchor.column : columnIndex);
+    if (!selection) return;
+    setEditingCell(null);
+    setCellSelection(selection);
+    gridRef.current?.focus?.({ preventScroll: true });
+  }, [adapters.length, cellSelection, rows.length]);
+
   const moveCellSelection = useCallback((column, row, extend = false) => {
     setCellSelection((current) => {
       const next = moveSelection(current, column, row, adapters.length, Math.max(1, rows.length), extend);
@@ -1445,13 +1467,36 @@ export default function App() {
                 </colgroup>
                 <thead><tr>
                   <th className="row-marker" style={{ width: ROW_MARKER_WIDTH, minWidth: ROW_MARKER_WIDTH }}><input type="checkbox" aria-label="选择全部记录" checked={rows.length > 0 && selectedRows.length === rows.length} onChange={(event) => setSelectedRows(event.target.checked ? rows.map((row) => row.key) : [])} /></th>
-                  {columns.map((column) => <th key={column.id} className={queryState.sortId === column.id || queryState.filterMap[column.id] ? "header-active" : ""} style={{ width: column.width, minWidth: 0 }}>
-                    <span className="header-title">{column.title}</span>
+                  {columns.map((column, columnIndex) => {
+                    const selected = cellSelectionRange
+                      && cellSelectionRange.top === 0
+                      && cellSelectionRange.bottom === rows.length - 1
+                      && columnIndex >= cellSelectionRange.left
+                      && columnIndex <= cellSelectionRange.right;
+                    return <th key={column.id} className={[queryState.sortId === column.id || queryState.filterMap[column.id] ? "header-active" : "", selected && "header-selected"].filter(Boolean).join(" ")} style={{ width: column.width, minWidth: 0 }}>
+                    <button
+                      type="button"
+                      className="header-select-trigger"
+                      aria-label={`选择${column.title}列`}
+                      onPointerDown={(event) => {
+                        if (event.button !== 0) return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        selectWholeColumn(columnIndex, event.shiftKey);
+                      }}
+                      onKeyDown={(event) => {
+                        if (event.key !== "Enter" && event.key !== " ") return;
+                        event.preventDefault();
+                        event.stopPropagation();
+                        selectWholeColumn(columnIndex, event.shiftKey);
+                      }}
+                    ><span className="header-title">{column.title}</span></button>
                     {queryState.sortId === column.id && <span className="sort-indicator">{queryState.isAsc ? "↑" : "↓"}</span>}
                     {queryState.filterMap[column.id] && <span className="filter-indicator" title="已设置筛选">●</span>}
                     <button type="button" className="column-menu-trigger" aria-label={`打开${column.title}菜单`} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => openColumnMenu(event, column)}>⌄</button>
                     <span className={`column-resize-handle ${resizing === `column:${column.id}` ? "active" : ""}`} aria-hidden="true" onPointerDown={(event) => beginColumnResize(event, column.id)} />
-                  </th>)}
+                  </th>;
+                  })}
                 </tr></thead>
                 <tbody>
                 {virtualWindow.top > 0 && <tr className="virtual-spacer" aria-hidden="true"><td colSpan={adapters.length + 1} style={{ height: virtualWindow.top }} /></tr>}
@@ -1460,7 +1505,29 @@ export default function App() {
                   const previewRow = row.state === "preview";
                   const rowHeight = rowHeightFor(row);
                   return <tr key={row.key} data-row-key={row.key} className={`row-${row.state}${row.conflict ? " row-conflict" : ""}`} style={{ height: rowHeight }} aria-hidden={previewRow || undefined}>
-                  <td className="row-marker" style={{ height: rowHeight }}>{!previewRow && <input type="checkbox" aria-label={`选择第 ${rowIndex + 1} 行`} checked={selectedRows.includes(row.key)} onChange={(event) => setSelectedRows((current) => event.target.checked ? [...new Set([...current, row.key])] : current.filter((item) => item !== row.key))} />}<span>{rowIndex + 1}</span>{!previewRow && <span className={`row-resize-handle ${resizing === `row:${row.key}` ? "active" : ""}`} aria-label="调整行高" title="拖拽调整行高" onPointerDown={(event) => beginRowResize(event, row)} />}</td>
+                  <td className={["row-marker", cellSelectionRange && cellSelectionRange.left === 0 && cellSelectionRange.right === adapters.length - 1 && rowIndex >= cellSelectionRange.top && rowIndex <= cellSelectionRange.bottom ? "row-marker-selected" : ""].filter(Boolean).join(" ")} style={{ height: rowHeight }}>
+                    {!previewRow && <input type="checkbox" aria-label={`选择第 ${rowIndex + 1} 行`} checked={selectedRows.includes(row.key)} onChange={(event) => setSelectedRows((current) => event.target.checked ? [...new Set([...current, row.key])] : current.filter((item) => item !== row.key))} />}
+                    {previewRow
+                      ? <span>{rowIndex + 1}</span>
+                      : <button
+                          type="button"
+                          className="row-select-trigger"
+                          aria-label={`选择第 ${rowIndex + 1} 行内容`}
+                          onPointerDown={(event) => {
+                            if (event.button !== 0) return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            selectWholeRow(rowIndex, event.shiftKey);
+                          }}
+                          onKeyDown={(event) => {
+                            if (event.key !== "Enter" && event.key !== " ") return;
+                            event.preventDefault();
+                            event.stopPropagation();
+                            selectWholeRow(rowIndex, event.shiftKey);
+                          }}
+                        >{rowIndex + 1}</button>}
+                    {!previewRow && <span className={`row-resize-handle ${resizing === `row:${row.key}` ? "active" : ""}`} aria-label="调整行高" title="拖拽调整行高" onPointerDown={(event) => beginRowResize(event, row)} />}
+                  </td>
                   {adapters.map((adapter, columnIndex) => {
                     const fieldId = adapter.control.controlId;
                     const previewValue = fillPreviewCells.get(`${rowIndex}:${columnIndex}`);

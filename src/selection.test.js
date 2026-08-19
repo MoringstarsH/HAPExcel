@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { cellsInRange, containsCell, moveSelection, selectionRange } from "./selection";
+import { cellsInRange, containsCell, moveSelection, selectionRange, wholeColumnSelection, wholeRowSelection } from "./selection";
 
 describe("selection", () => {
   it("normalizes reverse drag ranges", () => {
@@ -13,5 +13,18 @@ describe("selection", () => {
     const start = { anchor: { column: 1, row: 1 }, focus: { column: 1, row: 1 } };
     expect(moveSelection(start, 1, 0, 3, 3, false).anchor).toEqual({ column: 2, row: 1 });
     expect(moveSelection(start, -4, 5, 3, 3, true)).toEqual({ anchor: start.anchor, focus: { column: 0, row: 2 } });
+  });
+
+  it("creates a complete row selection and supports reverse shift extension", () => {
+    const selection = wholeRowSelection(4, 3, 6);
+    expect(selection).toEqual({ anchor: { column: 0, row: 4 }, focus: { column: 2, row: 4 } });
+    expect(selectionRange(wholeRowSelection(2, 3, 6, 4))).toEqual({ left: 0, right: 2, top: 2, bottom: 4, width: 3, height: 3 });
+  });
+
+  it("creates a complete column selection and handles empty or out-of-range input", () => {
+    expect(wholeColumnSelection(1, 4, 5)).toEqual({ anchor: { column: 1, row: 0 }, focus: { column: 1, row: 4 } });
+    expect(wholeColumnSelection(99, 4, 5, -2)).toEqual({ anchor: { column: 0, row: 0 }, focus: { column: 3, row: 4 } });
+    expect(wholeRowSelection(0, 0, 5)).toBeNull();
+    expect(wholeColumnSelection(0, 4, 0)).toBeNull();
   });
 });

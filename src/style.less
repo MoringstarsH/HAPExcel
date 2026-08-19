@@ -188,7 +188,22 @@ button:disabled { cursor: not-allowed; opacity: .45; }
   white-space: nowrap;
   vertical-align: middle;
 }
+.header-select-trigger {
+  display: block;
+  width: 100%;
+  min-height: 32px;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.header-select-trigger:hover, .header-select-trigger:focus-visible { color: #245bdb; outline: none; }
 .header-active { color: #245bdb; }
+.header-selected { background: #e8f1ff !important; color: #245bdb; }
 .sort-indicator, .filter-indicator {
   margin-left: 5px;
   color: #3370ff;
@@ -247,8 +262,22 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .native-grid thead .row-marker { z-index: 4; }
 .native-grid .row-marker input { vertical-align: middle; }
 .native-grid .row-marker span { margin-left: 4px; font-size: 11px; }
+.row-select-trigger {
+  margin: 0 0 0 4px;
+  padding: 4px 3px;
+  border: 0;
+  color: inherit;
+  background: transparent;
+  font: inherit;
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.row-select-trigger:hover, .row-select-trigger:focus-visible { color: #245bdb; background: #e8f1ff; outline: none; }
 .native-grid tr:hover td { background: #f8faff; }
 .native-grid tr:hover .row-marker { background: #eef3ff; }
+.native-grid .row-marker-selected,
+.native-grid tr:hover .row-marker-selected { background: #e8f1ff; color: #245bdb; }
 .native-grid .row-new td { background: #f5f9ff; }
 .native-grid .row-deleted td { color: #98a2b3; background: #fff1f0; text-decoration: line-through; }
 

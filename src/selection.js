@@ -14,6 +14,30 @@ export function selectionRange(selection) {
   return { left, right, top, bottom, width: right - left + 1, height: bottom - top + 1 };
 }
 
+function boundedIndex(value, count) {
+  return Math.max(0, Math.min(Math.max(0, count - 1), Number(value) || 0));
+}
+
+export function wholeRowSelection(rowIndex, columnCount, rowCount, anchorRow = rowIndex) {
+  if (columnCount <= 0 || rowCount <= 0) return null;
+  const row = boundedIndex(rowIndex, rowCount);
+  const anchor = boundedIndex(anchorRow, rowCount);
+  return {
+    anchor: { column: 0, row: anchor },
+    focus: { column: columnCount - 1, row }
+  };
+}
+
+export function wholeColumnSelection(columnIndex, columnCount, rowCount, anchorColumn = columnIndex) {
+  if (columnCount <= 0 || rowCount <= 0) return null;
+  const column = boundedIndex(columnIndex, columnCount);
+  const anchor = boundedIndex(anchorColumn, columnCount);
+  return {
+    anchor: { column: anchor, row: 0 },
+    focus: { column, row: rowCount - 1 }
+  };
+}
+
 export function containsCell(selection, column, row) {
   const range = selectionRange(selection);
   return Boolean(range && column >= range.left && column <= range.right && row >= range.top && row <= range.bottom);
