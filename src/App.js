@@ -486,13 +486,14 @@ export default function App() {
   }, [allAdapters, gateway, hydrated, rows]);
 
   const columns = useMemo(() => controls.map((control, index) => {
-    const title = `${control.controlName || control.controlId}${control.required ? " *" : ""}`;
+    const title = control.controlName || control.controlId;
     const adapter = adapters[index];
     const number = adapter?.numberPresentation?.(0);
     const numberWidth = number ? 150 + Math.min(48, ((number.prefix?.length || 0) + (number.suffix?.length || 0)) * 12) : 0;
     return {
       id: control.controlId,
       title,
+      required: Boolean(control.required),
       width: columnWidths[control.controlId] || clampColumnWidth(Math.max(numberWidth, Math.min(260, title.length * 15 + 48))),
       grow: 0
     };
@@ -1583,7 +1584,7 @@ export default function App() {
                         event.stopPropagation();
                         selectWholeColumn(columnIndex, event.shiftKey);
                       }}
-                    ><span className="header-title">{column.title}</span></button>
+                    ><span className="header-title">{column.required && <span className="required-marker" aria-hidden="true">* </span>}{column.title}</span></button>
                     {queryState.sortId === column.id && <span className="sort-indicator">{queryState.isAsc ? "↑" : "↓"}</span>}
                     {queryState.filterMap[column.id] && <span className="filter-indicator" title="已设置筛选">●</span>}
                     <button type="button" className="column-menu-trigger" aria-label={`打开${column.title}菜单`} onPointerDown={(event) => event.stopPropagation()} onClick={(event) => openColumnMenu(event, column)}>⌄</button>
